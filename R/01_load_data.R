@@ -15,6 +15,7 @@ library(stringr)
 library(lubridate)
 library(tidyverse) # Includes purrr, dplyr, readr, lubridate
 library(sf)
+library(skimr)
 
 # Find Most Recent Data File --------------------------------------
 
@@ -474,12 +475,44 @@ rm(tb_register_list)
 message("\nInitial inspection of the combined data frame (types not yet converted):")
 
 # Display structure - expect many <chr> types now
-print(glimpse(tb_register_combined))
+skimr::skim(tb_register_combined)
 
-# Optional: Check unique values in a specific column (example)
-# message("\nUnique values sample for 'sex' column:")
-# if("sex" %in% colnames(tb_register_combined)) {
-#   print(unique(tb_register_combined$sex))
-# } else {
-#   message("'sex' column not found.")
-# }
+# Save Intermediate Combined Data (Before Type Conversion) --------
+
+message("\nSaving the combined data frame before type conversions...")
+
+# Check if the combined data frame exists
+if (!exists("tb_register_combined")) {
+  stop("Error: Data frame 'tb_register_combined' not found. Cannot save. Please run the combining step first.")
+}
+# Check if the latest file path variable exists (needed to get the date)
+if (!exists("latest_file")) {
+  stop("Error: Variable 'latest_file' (path to the source Excel file) not found. Cannot determine source file date.")
+}
+
+# Define output directory path using here()
+output_dir <- here::here("data-processed")
+
+## Get YYMMDD date string from the filename ----
+
+# Re-extract the date from the 'latest_file' variable for robustness
+source_file_date_str <- stringr::str_match(basename(latest_file), "rec (\\d{6})")[, 2]
+
+# Check if extraction worked, provide a fallback
+if (is.na(source_file_date_str)) {
+  warning("Could not extract YYMMDD date from source filename '", basename(latest_file),
+          "'. Using 'unknown_date' in output filename.")
+  source_file_date_str <- "unknown_date"
+}
+message("-> Using source file datestamp '", source_file_date_str, "' for output filename.")
+
+## Write csv and rds using filename and path ----
+
+csv_output_filename <- paste0("tb_register_combined_", source_file_date_str, ".csv")
+csv_output_path <- file.path(output_dir, csv_output_filename)
+rds_output_filename <- paste0("tb_register_combined_", source_file_date_str, ".rds")
+rds_output_path <- file.path(output_dir, rds_output_filename)
+
+readr::write_csv(tb_register_combined, output_path, na = "")  ## na = "" writes missing values (NA) as empty strings, common for CSVs
+saveRDS(tb_register_combined, file = rds_output_path)
+message("-> Successfully saved intermediate combined data as CSV and RDS using source file date.")
