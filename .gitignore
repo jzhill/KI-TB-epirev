@@ -47,3 +47,15 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+# ignore the raw data directory 
+data-raw/*
+
+# and the processed data directory (the code should have everything we need)
+data-processed/*
+
+# figures are generated and saved locally
+figures/*
+
+# reports are generated and saved locally
+reports/*
