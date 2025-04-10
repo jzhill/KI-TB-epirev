@@ -141,7 +141,9 @@ print(na_counts)
 # Apply trimming and lowercasing
 tb_register_combined <- tb_register_combined %>%
   dplyr::mutate(address_clean = str_trim(str_to_lower(address))) %>%
-  dplyr::relocate(address_clean, .after = address)
+  dplyr::relocate(address_clean, .after = address) %>%
+  dplyr::relocate(address_desc_2024, .after = address_clean) %>%
+  dplyr::relocate(school_2024, .after = address_desc_2024)
 
 message("-> Whitespace trimmed and address converted to lowercase.")
 
@@ -197,95 +199,95 @@ if (nrow(new_addresses_df) == 0) {
   message("   -> Successfully saved new unique addresses.")
 }
 
-# Add Island and Village Codes via Lookup Table ---------------------
-
-## Prepare Lookup Table ----
-# Define expected column names
-addr_col_lookup <- "Address-unique" # The original messy address in the lookup
-island_col_lookup <- "island-coded"     # The island code column
-village_col_lookup <- "ST-village-coded" # The village code column
-required_lookup_cols <- c(addr_col_lookup, island_col_lookup, village_col_lookup)
-
-# Check if required columns exist in the lookup table
-if (!all(required_lookup_cols %in% colnames(address_lookup_table))) {
-  stop("Error: Lookup table '", basename(lookup_file), "' is missing required columns. ",
-       "Expected: '", paste(required_lookup_cols, collapse="', '"), "'")
-}
-
-# Clean the address column in the lookup table to match the main data's 'address_clean'
-# Select only needed columns, ensure address_clean is unique
-lookup_prepared <- address_lookup_table %>%
-  dplyr::select(
-    !!sym(addr_col_lookup), # Keep original for reference if needed, or remove
-    !!sym(island_col_lookup),
-    !!sym(village_col_lookup)
-  ) %>%
-  dplyr::mutate(
-    # Create the cleaned address column to join on
-    address_clean = stringr::str_trim(stringr::str_to_lower(.data[[addr_col_lookup]]))
-  ) %>%
-  # Keep only the cleaned address and the coded columns for joining
-  dplyr::select(
-    address_clean,
-    !!sym(island_col_lookup),
-    !!sym(village_col_lookup)
-  ) %>%
-  # Remove rows where the cleaned address is NA
-  dplyr::filter(!is.na(address_clean)) %>%
-  # Ensure address_clean is unique - keep only the first match if duplicates exist
-  dplyr::distinct(address_clean, .keep_all = TRUE)
-
-n_distinct_lookup <- nrow(lookup_prepared)
-message("-> Prepared lookup table with ", n_distinct_lookup, " unique cleaned addresses.")
-if (n_distinct_lookup < nrow(address_lookup_table)) {
-  message("  -> NOTE: Removed ", nrow(address_lookup_table) - n_distinct_lookup,
-          " rows from lookup due to missing or duplicate cleaned addresses.")
-}
-
-
-# --- 3. Prepare Main Data Table ---
-# Check if tb_register_combined exists and has the cleaned address column
-if (!exists("tb_register_combined")) {
-  stop("Error: Data frame 'tb_register_combined' not found.")
-}
-if (!"address_clean" %in% colnames(tb_register_combined)) {
-  stop("Error: Column 'address_clean' not found in tb_register_combined. Please run the previous cleaning step.")
-}
-
-
-# --- 4. Perform Left Join ---
-message("-> Joining lookup table to main data based on 'address_clean'...")
-
-tb_register_combined <- dplyr::left_join(
-  tb_register_combined,
-  lookup_prepared,
-  by = "address_clean" # Join key
-)
-
-message("-> Join complete. Added '", island_col_lookup, "' and '", village_col_lookup, "' columns.")
-
-
-# --- 5. Inspect Results ---
-message("\nChecking results of address lookup join:")
-
-# Calculate how many rows got a match
-match_rate <- tb_register_combined %>%
-  dplyr::summarise(
-    n_total = dplyr::n(),
-    n_island_na = sum(is.na(.data[[island_col_lookup]])),
-    n_village_na = sum(is.na(.data[[village_col_lookup]]))
-  ) %>%
-  dplyr::mutate(
-    perc_island_matched = scales::percent(1 - (n_island_na / n_total), accuracy = 0.1),
-    perc_village_matched = scales::percent(1 - (n_village_na / n_total), accuracy = 0.1)
-  )
-
-message("-> Island codes added for ", match_rate$perc_island_matched, " of rows (",
-        match_rate$n_island_na, " missing).")
-message("-> Village codes added for ", match_rate$perc_village_matched, " of rows (",
-        match_rate$n_village_na, " missing).")
-
-# Glimpse the new columns
-print(glimpse(dplyr::select(tb_register_combined,
-                            address, address_clean,
-                            tidyselect::all_of(c(island_col_lookup, village_col_lookup)))))
+# # Add Island and Village Codes via Lookup Table ---------------------
+# 
+# ## Prepare Lookup Table ----
+# # Define expected column names
+# addr_col_lookup <- "Address-unique" # The original messy address in the lookup
+# island_col_lookup <- "island-coded"     # The island code column
+# village_col_lookup <- "ST-village-coded" # The village code column
+# required_lookup_cols <- c(addr_col_lookup, island_col_lookup, village_col_lookup)
+# 
+# # Check if required columns exist in the lookup table
+# if (!all(required_lookup_cols %in% colnames(address_lookup_table))) {
+#   stop("Error: Lookup table '", basename(lookup_file), "' is missing required columns. ",
+#        "Expected: '", paste(required_lookup_cols, collapse="', '"), "'")
+# }
+# 
+# # Clean the address column in the lookup table to match the main data's 'address_clean'
+# # Select only needed columns, ensure address_clean is unique
+# lookup_prepared <- address_lookup_table %>%
+#   dplyr::select(
+#     !!sym(addr_col_lookup), # Keep original for reference if needed, or remove
+#     !!sym(island_col_lookup),
+#     !!sym(village_col_lookup)
+#   ) %>%
+#   dplyr::mutate(
+#     # Create the cleaned address column to join on
+#     address_clean = stringr::str_trim(stringr::str_to_lower(.data[[addr_col_lookup]]))
+#   ) %>%
+#   # Keep only the cleaned address and the coded columns for joining
+#   dplyr::select(
+#     address_clean,
+#     !!sym(island_col_lookup),
+#     !!sym(village_col_lookup)
+#   ) %>%
+#   # Remove rows where the cleaned address is NA
+#   dplyr::filter(!is.na(address_clean)) %>%
+#   # Ensure address_clean is unique - keep only the first match if duplicates exist
+#   dplyr::distinct(address_clean, .keep_all = TRUE)
+# 
+# n_distinct_lookup <- nrow(lookup_prepared)
+# message("-> Prepared lookup table with ", n_distinct_lookup, " unique cleaned addresses.")
+# if (n_distinct_lookup < nrow(address_lookup_table)) {
+#   message("  -> NOTE: Removed ", nrow(address_lookup_table) - n_distinct_lookup,
+#           " rows from lookup due to missing or duplicate cleaned addresses.")
+# }
+# 
+# 
+# # --- 3. Prepare Main Data Table ---
+# # Check if tb_register_combined exists and has the cleaned address column
+# if (!exists("tb_register_combined")) {
+#   stop("Error: Data frame 'tb_register_combined' not found.")
+# }
+# if (!"address_clean" %in% colnames(tb_register_combined)) {
+#   stop("Error: Column 'address_clean' not found in tb_register_combined. Please run the previous cleaning step.")
+# }
+# 
+# 
+# # --- 4. Perform Left Join ---
+# message("-> Joining lookup table to main data based on 'address_clean'...")
+# 
+# tb_register_combined <- dplyr::left_join(
+#   tb_register_combined,
+#   lookup_prepared,
+#   by = "address_clean" # Join key
+# )
+# 
+# message("-> Join complete. Added '", island_col_lookup, "' and '", village_col_lookup, "' columns.")
+# 
+# 
+# # --- 5. Inspect Results ---
+# message("\nChecking results of address lookup join:")
+# 
+# # Calculate how many rows got a match
+# match_rate <- tb_register_combined %>%
+#   dplyr::summarise(
+#     n_total = dplyr::n(),
+#     n_island_na = sum(is.na(.data[[island_col_lookup]])),
+#     n_village_na = sum(is.na(.data[[village_col_lookup]]))
+#   ) %>%
+#   dplyr::mutate(
+#     perc_island_matched = scales::percent(1 - (n_island_na / n_total), accuracy = 0.1),
+#     perc_village_matched = scales::percent(1 - (n_village_na / n_total), accuracy = 0.1)
+#   )
+# 
+# message("-> Island codes added for ", match_rate$perc_island_matched, " of rows (",
+#         match_rate$n_island_na, " missing).")
+# message("-> Village codes added for ", match_rate$perc_village_matched, " of rows (",
+#         match_rate$n_village_na, " missing).")
+# 
+# # Glimpse the new columns
+# print(glimpse(dplyr::select(tb_register_combined,
+#                             address, address_clean,
+#                             tidyselect::all_of(c(island_col_lookup, village_col_lookup)))))

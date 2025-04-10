@@ -513,6 +513,6 @@ csv_output_path <- file.path(output_dir, csv_output_filename)
 rds_output_filename <- paste0("tb_register_combined_", source_file_date_str, ".rds")
 rds_output_path <- file.path(output_dir, rds_output_filename)
 
-readr::write_csv(tb_register_combined, output_path, na = "")  ## na = "" writes missing values (NA) as empty strings, common for CSVs
+readr::write_csv(tb_register_combined, csv_output_path, na = "")  ## na = "" writes missing values (NA) as empty strings, common for CSVs
 saveRDS(tb_register_combined, file = rds_output_path)
 message("-> Successfully saved intermediate combined data as CSV and RDS using source file date.")
