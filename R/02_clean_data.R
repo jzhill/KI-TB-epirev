@@ -13,6 +13,7 @@ library(here)
 library(tidyverse) # includes readr, dplyr, stringr, etc.
 library(lubridate)
 library(skimr)
+library(epikit)
 
 # Load processed data -------------
 
@@ -211,3 +212,146 @@ tb_register_combined <- dplyr::left_join(
 
 message("-> Join complete. Added island_coded and ST_village_coded columns.")
 
+# Clean Age Column ------------------------------------------------
+
+## Apply cleaning rules using mutate and case_when ----
+tb_register_combined <- tb_register_combined %>%
+  dplyr::mutate(
+    # Clean age input first (trim whitespace)
+    age_trimmed = stringr::str_trim(as.character(age)),
+    
+    # Create age_clean column based on patterns in the trimmed age column
+    age_clean = dplyr::case_when(
+      # Handle NA inputs first
+      is.na(age_trimmed) | age_trimmed == "" ~ NA_real_,
+      
+      # Rule 1: Already a whole number (integer years)
+      stringr::str_detect(age_trimmed, "^\\d+$")
+      ~ as.numeric(age_trimmed),
+      
+      # Rule 2: Weeks format (e.g., "3/52", "10 / 52") -> always round up to 1 year
+      stringr::str_detect(age_trimmed, "^\\d+\\s*/\\s*52$")
+      ~ 1.0,
+      
+      # Rule 3: Months format X/12 (e.g., "10/12", "18 / 12") -> round years UP
+      stringr::str_detect(age_trimmed, "^\\d+\\s*/\\s*12$")
+      ~ ceiling(as.numeric(stringr::str_extract(age_trimmed, "^\\d+")) / 12),
+      
+      # Rule 4: Months format (e.g., "9m", "10 mth", "6 mnths") -> round years UP
+      stringr::str_detect(age_trimmed, "^\\d+\\s*m")
+      ~ ceiling(as.numeric(stringr::str_extract(age_trimmed, "^\\d+")) / 12),
+      
+      # Rule 5: Handle "X+" format (e.g., "70+", "1+") -> return the value before the +
+      stringr::str_detect(age_trimmed, "^\\d+\\+$")
+      ~ as.numeric(stringr::str_extract(age_trimmed, "^\\d+")),
+      
+      # Default: If none of the above patterns match, result is NA (numeric NA)
+      TRUE ~ NA_real_
+    ),
+    # Remove temporary trimmed column
+    age_trimmed = NULL
+  ) %>%
+  # Optional: Move age_clean next to the original age column
+  dplyr::relocate(age_clean, .after = age)
+
+message("-> Created 'age_clean' column (handling X+ format).") # Updated message
+
+## Inspect the results ---------------------------------------------
+message("\nSummary of original 'age' and new 'age_clean':")
+
+# Show summary statistics for the new numeric age column
+print(summary(tb_register_combined$age_clean))
+
+# Check how many NAs are in the new column
+na_age_clean <- sum(is.na(tb_register_combined$age_clean))
+original_na_age <- sum(is.na(tb_register_combined$age))
+message("-> 'age_clean' contains ", na_age_clean, " NA values (original 'age' column had ", original_na_age, ").")
+
+# View rows where age_clean is NA but original age was not
+unparsed_ages <- tb_register_combined %>%
+  dplyr::filter(is.na(age_clean) & !is.na(age)) %>%
+  dplyr::count(age, sort = TRUE, name = "count_unparsed")
+
+if(nrow(unparsed_ages) > 0) {
+  message("-> Found ", sum(unparsed_ages$count_unparsed), " records (", nrow(unparsed_ages), " unique values) where non-NA 'age' resulted in NA 'age_clean':")
+  print(head(unparsed_ages))
+} else {
+  message("-> All non-NA 'age' values appear to have been parsed successfully.")
+}
+
+# Create age group columns using epikit --------------------------
+
+# Determine max age for setting upper limit for 10-year bins
+max_age <- max(tb_register_combined$age_clean, na.rm = TRUE)
+
+# Set upper limit for explicit 10-year bins (e.g., if max age is 89, upper is 80)
+upper_limit_10yr <- floor(max_age / 10) * 10
+
+# Define the specific breaks for WHO categories
+age_breaks_who <- c(0, 5, 15, 25, 35, 45, 55, 65) # Lower bounds
+
+# Add the age group columns using mutate and epikit::age_categories
+tb_register_combined <- tb_register_combined %>%
+  dplyr::mutate(
+    
+    # Standard 10-year bins using lower, upper, by
+    # This creates groups like 0-9, 10-19, ..., up to upper_limit-upper_limit+9,
+    # and then an upper_limit+ category
+    age_group_10yr = epikit::age_categories(
+      age_clean,
+      lower = 0,
+      upper = upper_limit_10yr, # Define upper boundary for explicit groups
+      by = 10
+    ),
+    
+    # WHO TB Programme standard bins using specific breakers
+    # This creates groups 0-4, 5-14, ..., 55-64, and 65+
+    age_group_who = epikit::age_categories(
+      age_clean,
+      breakers = age_breaks_who  # Default separator is "-", ceiling=FALSE gives "65+" for the last group
+    )
+  ) %>%
+  dplyr::relocate(age_group_10yr, .after = age_clean) %>%
+  dplyr::relocate(age_group_who, .after = age_group_10yr)
+
+message("-> Created 'age_group_10yr' and 'age_group_who' columns using epikit.")
+
+# Inspect the results ---------------------------------------------
+message("\nCounts for epikit 10-year age groups:")
+print(tb_register_combined %>% dplyr::count(age_group_10yr, .drop = FALSE))
+
+message("\nCounts for epikit WHO age groups:")
+print(tb_register_combined %>% dplyr::count(age_group_who, .drop = FALSE))
+
+# Clean sex column ------------------------------------------------
+
+# Use mutate with case_match for standardization into a new column
+tb_register_combined <- tb_register_combined %>%
+  dplyr::mutate(
+    
+    # Create intermediate standardized character column first
+    # This avoids issues if factor conversion happened before case_match
+    sex_standardized_char = dplyr::case_match(
+      stringr::str_to_upper(sex), # Compare uppercase versions
+      "M"  ~ "Male",             # Map "M" or "m" to "Male"
+      "MN" ~ "Male",             # Map "MN" typo to "Male"
+      "F"  ~ "Female",           # Map "F" or "f" to "Female"
+      
+      # All other values (original NA, any others) become NA_character_
+      .default = NA_character_
+    ),
+    
+    # Create the final 'sex_clean' column as a Factor from the standardized char
+    sex_clean = factor(sex_standardized_char, levels = c("Male", "Female")),
+    
+    # Remove the intermediate character column - no longer needed
+    sex_standardized_char = NULL
+  ) %>%
+  dplyr::relocate(sex_clean, .after = sex)
+
+message("-> Created 'sex_clean' column (Factor: Male/Female/NA).")
+
+# Inspect the results ---------------------------------------------
+message("\nCounts of values in new 'sex_clean' column:")
+# Use .drop = FALSE in count to include a count for NA values
+print(tb_register_combined %>% dplyr::count(sex_clean, .drop = FALSE))
