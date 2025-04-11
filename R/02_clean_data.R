@@ -200,17 +200,98 @@ if (nrow(new_addresses_df) == 0) {
   message("   -> Successfully saved new unique addresses.")
 }
 
-# Add Island and Village Codes via Lookup Table ---------------------
+# Add island and village names via Lookup Table ---------------------
 
-tb_register_combined <- dplyr::left_join(
-  tb_register_combined,
-  address_lookup_table,
-  by = "address_clean"
-) %>%
-  dplyr::relocate(island_coded, .after = school_2024) %>% 
-  dplyr::relocate(ST_village_coded, .after = island_coded)
+cols_to_remove <- c(
+  "island",          # Target name after rename
+  "ST_village",      # Target name after rename
+  "island_coded",    # Name added by join (source for island)
+  "ST_village_coded" # Name added by join (source for ST_village)
+)
 
-message("-> Join complete. Added island_coded and ST_village_coded columns.")
+tb_register_combined <- tb_register_combined %>%
+  dplyr::select(-tidyselect::any_of(cols_to_remove)) %>%
+  left_join(address_lookup_table, by = "address_clean") %>%
+  dplyr::rename(island = island_coded, ST_village = ST_village_coded) %>%
+  dplyr::mutate(island = dplyr::if_else(island == "check", NA_character_, as.character(island))) %>% 
+  dplyr::relocate(island, .after = school_2024) %>%
+  dplyr::relocate(ST_village, .after = island)
+
+message("-> Join complete. Added island and ST_village columns.")
+
+# Add island and division names and codes --------------------
+
+# Load island census population table, which includes categories
+pop_island_census_file <- here::here("data-raw", "pop_island_census.csv")
+island_code_lookup <- readr::read_csv(pop_island_census_file, show_col_types = FALSE)
+
+## Prepare lookup table for joining ----
+# Clean the 'Island' column (lowercase, trim) and use it as the join key 'island'.
+# Keep other required columns.
+island_code_lookup <- island_code_lookup %>%
+  
+  # Clean the original 'Island' name and call it 'island' for joining
+  dplyr::mutate(
+    island = stringr::str_trim(stringr::str_to_lower(Island))
+  ) %>%
+  
+  # Keep only necessary columns for the join and the info we want to add
+  dplyr::select(
+    island,        # The cleaned island name (join key)
+    is_code,       # Keep the island code
+    division = Division,
+    div_code = div_code,
+    OI_ST = OI_ST
+  ) %>%
+  
+  # Remove rows where the cleaned island name is NA
+  dplyr::filter(!is.na(island)) %>%
+  
+  # Ensure the join key ('island') is unique in the lookup table
+  dplyr::distinct(island, .keep_all = TRUE)
+
+message("-> Prepared island lookup table with cleaned island names.")
+
+## Prepare main data table ----
+# Ensure 'island' column exists and is clean
+# (Assuming 'island' column was created/cleaned in a previous step)
+if (!"island" %in% colnames(tb_register_combined)) {
+  stop("Error: 'island' column not found in tb_register_combined. Please ensure it was created, possibly from the address lookup step.")
+}
+
+# Apply the same cleaning (lowercase, trim) to the main table's 'island' column
+# This ensures consistency even if previous steps were slightly different.
+tb_register_combined <- tb_register_combined %>%
+  dplyr::mutate(island = stringr::str_trim(stringr::str_to_lower(island)))
+
+message("-> Ensured 'island' column in main data is cleaned (lowercase, trimmed).")
+
+## Perform left join using the cleaned island name ----
+
+cols_to_add <- c("is_code", "division", "div_code", "OI_ST")
+
+tb_register_combined <- tb_register_combined %>%
+  
+  # Remove columns first to ensure idempotency
+  select(-any_of(cols_to_add)) %>%
+  
+  # Perform the join: tb_register_combined is piped in as 'x'
+  left_join(
+    island_code_lookup, # This is 'y', the table to join from
+    by = "island"       # The join key
+  ) %>%
+  
+  # Relocate the newly added columns
+  relocate(all_of(cols_to_add), .after = island)
+
+message("-> Join complete. Added/updated: ", paste(cols_to_add, collapse=", "))
+
+# Optional Inspection
+message("\nChecking join results (NA counts in new columns):")
+cols_to_check <- intersect(cols_to_add, colnames(tb_register_combined))
+if(length(cols_to_check) > 0) {
+  print(tb_register_combined %>% dplyr::summarise(dplyr::across(all_of(cols_to_check), ~sum(is.na(.)))))
+}
 
 # Clean Age Column ------------------------------------------------
 
@@ -316,7 +397,7 @@ tb_register_combined <- tb_register_combined %>%
 
 message("-> Created 'age_group_10yr' and 'age_group_who' columns using epikit.")
 
-# Inspect the results ---------------------------------------------
+## Inspect the results ---------------------------------------------
 message("\nCounts for epikit 10-year age groups:")
 print(tb_register_combined %>% dplyr::count(age_group_10yr, .drop = FALSE))
 
@@ -351,7 +432,124 @@ tb_register_combined <- tb_register_combined %>%
 
 message("-> Created 'sex_clean' column (Factor: Male/Female/NA).")
 
-# Inspect the results ---------------------------------------------
+## Inspect the results ---------------------------------------------
+
 message("\nCounts of values in new 'sex_clean' column:")
 # Use .drop = FALSE in count to include a count for NA values
 print(tb_register_combined %>% dplyr::count(sex_clean, .drop = FALSE))
+
+# Export unique disease site/type entries for lookup creation -----------------------
+
+# Define the source columns
+source_cols <- c(
+  "disease_site",
+  "disease_site_pulm_2018",
+  "disease_site_ep_2018",
+  "disease_site_bc_2020",
+  "disease_site_cd_2020"
+)
+source_cols_present <- intersect(source_cols, colnames(tb_register_combined))
+
+if (length(source_cols_present) == 0) {
+  stop("Error: None of the specified source disease columns found.")
+}
+
+# Gather unique non-NA string values, clean them
+unique_disease_entries <- tb_register_combined %>%
+  dplyr::select(tidyselect::all_of(source_cols_present)) %>%
+  tidyr::pivot_longer(
+    cols = tidyselect::everything(),
+    names_to = "original_column",
+    values_to = "original_disease_entry",
+    values_drop_na = TRUE
+  ) %>%
+  dplyr::mutate(
+    unique_clean_disease_string = stringr::str_trim(stringr::str_to_lower(original_disease_entry))
+  ) %>%
+  dplyr::filter(unique_clean_disease_string != "") %>%
+  dplyr::distinct(unique_clean_disease_string, .keep_all = TRUE)
+
+unique_disease_entries <- unique_disease_entries %>%
+  dplyr::mutate(
+    disease_ptb       = "", # Add blank column
+    disease_eptb      = "", # Add blank column
+    disease_site_desc = "", # Add blank column
+    disease_bc_cd     = ""  # Add blank column
+  ) %>%
+  # Arrange alphabetically by the original cleaned entry
+  dplyr::arrange(unique_clean_disease_string)
+
+message("-> Found ", nrow(unique_disease_entries),
+        " unique non-NA disease site/type entries.")
+
+# Define output directory and filename
+output_dir <- here::here("data-processed")
+output_filename <- "unique_disease_site_type_entries_lookup_template.csv" # Updated filename
+output_path <- file.path(output_dir, "unique_disease_sites_template.csv")
+
+# Write the unique entries and blank columns to CSV
+readr::write_csv(unique_disease_entries, output_path, na = "") # Write NA as empty string
+
+message("-> Successfully saved unique disease site/type entries template.")
+
+
+# Clean Disease Site and Type using specified rules -------------
+
+# Define source columns
+source_cols <- c(
+  "disease_site", "disease_site_pulm_2018", "disease_site_ep_2018",
+  "disease_site_bc_2020", "disease_site_cd_2020"
+)
+
+# Apply classification rules using mutate
+tb_register_combined <- tb_register_combined %>%
+  dplyr::mutate(
+    
+    # Create temporary cleaned versions of source columns first
+    across(
+      tidyselect::any_of(source_cols), # Use any_of in case some are missing
+      ~ str_trim(str_to_lower(as.character(.))),
+      .names = "{.col}_clean"
+    ),
+    
+    # --- disease_ptb (Binary: Pulmonary TB?) ---
+    disease_ptb = dplyr::case_when(
+      disease_site_ep_2018_clean == "pneumonia" ~ TRUE,
+      disease_site_clean %in% c("lung abscess", "ptb", "ptb +ve") ~ TRUE,
+      disease_site_pulm_2018_clean == "1" ~ TRUE,
+      TRUE ~ NA
+    ),
+    
+    # --- disease_eptb (Binary: Extrapulmonary TB?) ---
+    disease_eptb = dplyr::case_when(
+      disease_site_pulm_2018_clean %in% c("latent tb", "miliary tb") ~ TRUE,
+      !is.na(disease_site_ep_2018_clean) &
+        !disease_site_ep_2018_clean %in% c("40837", "44918", "pneumonia") ~ TRUE,
+      !is.na(disease_site_cd_2020_clean) & disease_site_cd_2020_clean != "cd" ~ TRUE,
+      !is.na(disease_site_clean) &
+        !disease_site_clean %in% c("lung abscess", "ptb", "ptb +ve") ~ TRUE,
+      TRUE ~ NA
+    ),
+    
+    # --- disease_bc_cd (Factor: BC or CD) ---
+    disease_bc_cd = dplyr::case_when(
+      disease_site_bc_2020_clean == "bc" ~ "BC",
+      disease_site_cd_2020_clean == "cd" ~ "CD",
+      # Handle 'cd' potentially being in the bc column too
+      disease_site_bc_2020_clean == "cd" ~ "CD",
+      TRUE ~ NA_character_
+    ),
+    
+    # Convert to factor
+    disease_bc_cd = factor(disease_bc_cd, levels = c("BC", "CD"))
+    
+  ) %>% # End of mutate()
+  
+  dplyr::select(
+    -tidyselect::any_of(paste0(source_cols, "_clean"))
+  ) %>%
+
+  dplyr::relocate(disease_ptb, disease_eptb, disease_bc_cd, .after = disease_site)
+
+message("-> Created disease classification columns.")
+
