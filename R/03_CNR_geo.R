@@ -518,8 +518,7 @@ print(plot_cnr_island)
 print(plot_cnr_division)
 print(plot_cnr_oi_st)
 
-# Optional: Save the plots
-# ggsave(here::here("outputs", "cnr_by_island.png"), plot = plot_cnr_island, width = 10, height = 8)
-# ggsave(here::here("outputs", "cnr_by_division.png"), plot = plot_cnr_division, width = 8, height = 6)
-# ggsave(here::here("outputs", "cnr_by_oi_st.png"), plot = plot_cnr_oi_st, width = 8, height = 6)
-# message("\nPlots saved to 'outputs' folder.")
+ggsave(here::here("figures", "cnr_by_island.png"), plot = plot_cnr_island, width = 10, height = 8)
+ggsave(here::here("figures", "cnr_by_division.png"), plot = plot_cnr_division, width = 8, height = 6)
+ggsave(here::here("figures", "cnr_by_oi_st.png"), plot = plot_cnr_oi_st, width = 8, height = 6)
+message("\nPlots saved to 'figures' folder.")

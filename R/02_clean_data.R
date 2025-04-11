@@ -43,7 +43,7 @@ if (exists("tb_register_combined", where = .GlobalEnv) &&
   }
   
   # Extract date strings and find the latest file
-  date_strings <- stringr::str_match(basename(all_files), "(\\d{6})\\.[^.]+$")[, 2]
+  date_strings <- stringr::str_match(basename(rds_files), "(\\d{6})\\.[^.]+$")[, 2]
   file_dates <- as.Date(date_strings, format = "%y%m%d") # Handle potential NAs silently
   latest_index <- which.max(file_dates)
   
@@ -516,7 +516,7 @@ tb_register_combined <- tb_register_combined %>%
     disease_ptb = dplyr::case_when(
       disease_site_ep_2018_clean == "pneumonia" ~ TRUE,
       disease_site_clean %in% c("lung abscess", "ptb", "ptb +ve") ~ TRUE,
-      disease_site_pulm_2018_clean == "1" ~ TRUE,
+      disease_site_pulm_2018_clean %in% c("1", "ptb") ~ TRUE,
       TRUE ~ NA
     ),
     
