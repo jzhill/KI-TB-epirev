@@ -35,7 +35,7 @@ if (length(all_files) == 0) {
 }
 
 # Extract date strings and parse dates
-date_strings <- stringr::str_match(basename(all_files), "rec (\\d{6})")[, 2]
+date_strings <- stringr::str_match(basename(all_files), "(\\d{6})\\.[^.]+$")[, 2]
 file_dates <- rep(as.Date(NA), length(all_files))
 valid_indices <- !is.na(date_strings)
 if (!any(valid_indices)) {
@@ -477,9 +477,7 @@ message("\nInitial inspection of the combined data frame (types not yet converte
 # Display structure - expect many <chr> types now
 skimr::skim(tb_register_combined)
 
-# Save Intermediate Combined Data (Before Type Conversion) --------
-
-message("\nSaving the combined data frame before type conversions...")
+# Save Intermediate Combined Data --------
 
 # Check if the combined data frame exists
 if (!exists("tb_register_combined")) {
@@ -496,7 +494,7 @@ output_dir <- here::here("data-processed")
 ## Get YYMMDD date string from the filename ----
 
 # Re-extract the date from the 'latest_file' variable for robustness
-source_file_date_str <- stringr::str_match(basename(latest_file), "rec (\\d{6})")[, 2]
+source_file_date_str <- stringr::str_match(basename(latest_file), "(\\d{6})\\.[^.]+$")[, 2]
 
 # Check if extraction worked, provide a fallback
 if (is.na(source_file_date_str)) {

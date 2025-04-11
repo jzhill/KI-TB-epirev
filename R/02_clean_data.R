@@ -43,7 +43,7 @@ if (exists("tb_register_combined", where = .GlobalEnv) &&
   }
   
   # Extract date strings and find the latest file
-  date_strings <- stringr::str_match(basename(rds_files), "_(\\d{6})\\.rds$")[, 2]
+  date_strings <- stringr::str_match(basename(all_files), "(\\d{6})\\.[^.]+$")[, 2]
   file_dates <- as.Date(date_strings, format = "%y%m%d") # Handle potential NAs silently
   latest_index <- which.max(file_dates)
   
@@ -438,59 +438,59 @@ message("\nCounts of values in new 'sex_clean' column:")
 # Use .drop = FALSE in count to include a count for NA values
 print(tb_register_combined %>% dplyr::count(sex_clean, .drop = FALSE))
 
-# Export unique disease site/type entries for lookup creation -----------------------
-
-# Define the source columns
-source_cols <- c(
-  "disease_site",
-  "disease_site_pulm_2018",
-  "disease_site_ep_2018",
-  "disease_site_bc_2020",
-  "disease_site_cd_2020"
-)
-source_cols_present <- intersect(source_cols, colnames(tb_register_combined))
-
-if (length(source_cols_present) == 0) {
-  stop("Error: None of the specified source disease columns found.")
-}
-
-# Gather unique non-NA string values, clean them
-unique_disease_entries <- tb_register_combined %>%
-  dplyr::select(tidyselect::all_of(source_cols_present)) %>%
-  tidyr::pivot_longer(
-    cols = tidyselect::everything(),
-    names_to = "original_column",
-    values_to = "original_disease_entry",
-    values_drop_na = TRUE
-  ) %>%
-  dplyr::mutate(
-    unique_clean_disease_string = stringr::str_trim(stringr::str_to_lower(original_disease_entry))
-  ) %>%
-  dplyr::filter(unique_clean_disease_string != "") %>%
-  dplyr::distinct(unique_clean_disease_string, .keep_all = TRUE)
-
-unique_disease_entries <- unique_disease_entries %>%
-  dplyr::mutate(
-    disease_ptb       = "", # Add blank column
-    disease_eptb      = "", # Add blank column
-    disease_site_desc = "", # Add blank column
-    disease_bc_cd     = ""  # Add blank column
-  ) %>%
-  # Arrange alphabetically by the original cleaned entry
-  dplyr::arrange(unique_clean_disease_string)
-
-message("-> Found ", nrow(unique_disease_entries),
-        " unique non-NA disease site/type entries.")
-
-# Define output directory and filename
-output_dir <- here::here("data-processed")
-output_filename <- "unique_disease_site_type_entries_lookup_template.csv" # Updated filename
-output_path <- file.path(output_dir, "unique_disease_sites_template.csv")
-
-# Write the unique entries and blank columns to CSV
-readr::write_csv(unique_disease_entries, output_path, na = "") # Write NA as empty string
-
-message("-> Successfully saved unique disease site/type entries template.")
+# # Export unique disease site/type entries for lookup creation (COMMENTED) -----------------------
+# 
+# # Define the source columns
+# source_cols <- c(
+#   "disease_site",
+#   "disease_site_pulm_2018",
+#   "disease_site_ep_2018",
+#   "disease_site_bc_2020",
+#   "disease_site_cd_2020"
+# )
+# source_cols_present <- intersect(source_cols, colnames(tb_register_combined))
+# 
+# if (length(source_cols_present) == 0) {
+#   stop("Error: None of the specified source disease columns found.")
+# }
+# 
+# # Gather unique non-NA string values, clean them
+# unique_disease_entries <- tb_register_combined %>%
+#   dplyr::select(tidyselect::all_of(source_cols_present)) %>%
+#   tidyr::pivot_longer(
+#     cols = tidyselect::everything(),
+#     names_to = "original_column",
+#     values_to = "original_disease_entry",
+#     values_drop_na = TRUE
+#   ) %>%
+#   dplyr::mutate(
+#     unique_clean_disease_string = stringr::str_trim(stringr::str_to_lower(original_disease_entry))
+#   ) %>%
+#   dplyr::filter(unique_clean_disease_string != "") %>%
+#   dplyr::distinct(unique_clean_disease_string, .keep_all = TRUE)
+# 
+# unique_disease_entries <- unique_disease_entries %>%
+#   dplyr::mutate(
+#     disease_ptb       = "", # Add blank column
+#     disease_eptb      = "", # Add blank column
+#     disease_site_desc = "", # Add blank column
+#     disease_bc_cd     = ""  # Add blank column
+#   ) %>%
+#   # Arrange alphabetically by the original cleaned entry
+#   dplyr::arrange(unique_clean_disease_string)
+# 
+# message("-> Found ", nrow(unique_disease_entries),
+#         " unique non-NA disease site/type entries.")
+# 
+# # Define output directory and filename
+# output_dir <- here::here("data-processed")
+# output_filename <- "unique_disease_site_type_entries_lookup_template.csv" # Updated filename
+# output_path <- file.path(output_dir, "unique_disease_sites_template.csv")
+# 
+# # Write the unique entries and blank columns to CSV
+# readr::write_csv(unique_disease_entries, output_path, na = "") # Write NA as empty string
+# 
+# message("-> Successfully saved unique disease site/type entries template.")
 
 
 # Clean Disease Site and Type using specified rules -------------
@@ -553,3 +553,48 @@ tb_register_combined <- tb_register_combined %>%
 
 message("-> Created disease classification columns.")
 
+# Save cleaned combined data before analysis ---------------------
+
+# Check if the final data frame exists
+if (!exists("tb_register_combined")) {
+  stop("Error: Data frame 'tb_register_combined' not found. Cannot save.")
+}
+
+## Get YYMMDD date string from the relevant source filename ----
+source_file_date_str <- NA # Initialize
+
+# Prefer 'latest_file' if it exists (from loading script), if not, try 'latest_rds_file' (if loaded from RDS)
+# If neither, try finding newest raw file again.
+
+if (exists("latest_file") && !is.null(latest_file) && file.exists(latest_file)) {
+  source_file_date_str <- stringr::str_match(basename(latest_file), "(\\d{6})\\.[^.]+$")[, 2]
+  
+} else if (exists("latest_rds_file") && !is.null(latest_rds_file) && file.exists(latest_rds_file)) {
+  source_file_date_str <- stringr::str_match(basename(latest_rds_file), "_(\\d{6})\\.rds$")[, 2]
+  
+} 
+
+if (is.null(source_file_date_str) || is.na(source_file_date_str)) {
+  warning("Could not determine source file datestamp. Using 'unknown_date'.")
+  source_file_date_str <- "unknown_date"
+}
+
+# Define output directory path
+output_dir <- here::here("data-processed")
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+## Write csv and rds using filename and path ----
+csv_output_filename <- paste0("tb_register_cleaned_", source_file_date_str, ".csv")
+csv_output_path <- file.path(output_dir, csv_output_filename)
+rds_output_filename <- paste0("tb_register_cleaned_", source_file_date_str, ".rds")
+rds_output_path <- file.path(output_dir, rds_output_filename)
+
+# Write CSV
+message("-> Writing cleaned data to CSV: ", csv_output_path)
+readr::write_csv(tb_register_combined, csv_output_path, na = "")
+
+# Write RDS
+message("-> Writing cleaned data to RDS: ", rds_output_path)
+saveRDS(tb_register_combined, file = rds_output_path)
+
+message("-> Successfully saved cleaned data as CSV and RDS using source file date.")
