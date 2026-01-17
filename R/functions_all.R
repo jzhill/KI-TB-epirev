@@ -181,8 +181,11 @@ generate_error_log <- function(data, validation_map) {
   })
 }
 
+
 # Generates a unique value audit CSV for a set of columns
-export_unique_values_template <- function(data, target_cols, output_path, template_cols = NULL) {
+export_unique_values_template <- function(data, target_cols, output_path,
+                                          template_cols = NULL,
+                                          lookup_data = NULL) {
   
   # 1. Identify and report which requested columns actually exist in this data version
   
@@ -204,7 +207,7 @@ export_unique_values_template <- function(data, target_cols, output_path, templa
   }
   
   # 2. Pivot and Clean
-  unique_list <- data %>%
+  current_uniques <- data %>%
     select(all_of(present_cols)) %>%
     pivot_longer(
       cols = everything(),
@@ -212,25 +215,37 @@ export_unique_values_template <- function(data, target_cols, output_path, templa
       values_to = "raw_value",
       values_drop_na = TRUE
     ) %>%
-    mutate(
-      clean_value = str_trim(str_to_lower(raw_value))
-    ) %>%
+    mutate(clean_value = str_squish(str_trim(str_to_lower(raw_value)))) %>%
     filter(clean_value != "") %>%
     distinct(original_column, clean_value, .keep_all = TRUE) %>%
     arrange(original_column, clean_value)
   
-  # 3. Add blank template columns if requested
+  # 3. If a lookup already exists, merge the old coding into the new uniques
+  if (!is.null(lookup_data)) {
+    message("-> Pre-filling audit with existing lookup data...")
+    
+    # We join based on the context (column + clean_value)
+    current_uniques <- current_uniques %>%
+      left_join(
+        lookup_data %>% select(-any_of("raw_value")), # Don't duplicate raw_value
+        by = c("original_column", "clean_value")
+      )
+  }
+  
+  # 4. Add blank template columns if requested
   if (!is.null(template_cols)) {
     for (col in template_cols) {
-      unique_list[[col]] <- ""
+      if (!col %in% colnames(current_uniques)) {
+        current_uniques[[col]] <- ""
+      }
     }
   }
   
-  # 4. Export
-  write_csv(unique_list, output_path, na = "")
-  message("-> Audit template saved: ", basename(output_path), " (", nrow(unique_list), " unique values)")
+  # 5. Export
+  write_csv(current_uniques, output_path, na = "")
+  message("-> Audit template saved: ", basename(output_path), " (", nrow(current_uniques), " unique values)")
   
-  return(unique_list)
+  return(current_uniques)
 }
 
 # Defensive TB number formatter (Extracts digits then pads)
