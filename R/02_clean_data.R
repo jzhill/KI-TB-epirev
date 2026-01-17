@@ -210,7 +210,7 @@ geo_long <- reg_combined %>%
     values_drop_na = TRUE
     ) %>%
   mutate(
-    clean_value = str_trim(str_to_lower(raw_value)),
+    clean_value = str_squish(str_trim(str_to_lower(raw_value))),
     col_priority = factor(original_column, levels = geo_cols, ordered = TRUE)
   )
 
@@ -422,7 +422,7 @@ reg_combined <- reg_combined %>%
   mutate(ptb_eptb = factor(ptb_eptb, levels = c("PTB", "EPTB"))) %>%
   
   # Organize the new columns after joining
-  relocate(has_any_disease_data, ptb_eptb, starts_with("type_"), starts_with("site_"), .after = disease_site)
+  relocate(any_of(disease_cols), has_any_disease_data, ptb_eptb, starts_with("type_"), starts_with("site_"), .after = date_start_clean)
 
 message("-> Disease classification complete.")
 
@@ -453,7 +453,7 @@ if (!file.exists(cat_lookup_path)) stop("! Category lookup not found.")
 
 cat_lookup <- read_csv(cat_lookup_path, show_col_types = FALSE) %>%
   mutate(
-    clean_value = str_trim(str_to_lower(raw_value)),
+    clean_value = str_squish(str_trim(str_to_lower(raw_value))),
     registration_category = str_trim(str_to_lower(registration_category))
   ) %>% 
   mutate(registration_category = if_else(
@@ -523,6 +523,181 @@ reg_combined <- reg_combined %>%
   relocate(cat_ltfu_2018, cat_unknown_2018, cat_failure_dup, registration_category, .after = cat_others)
 
 message("-> Registration category classification complete.")
+
+
+
+# Bacteriology columns (smear / xpert / culture) audit and classification ------------------
+
+## Audit unique values ------------------------
+
+
+# Smear 
+bac_smear_cols <- c(
+  # pre-2018 separate result fields
+  "sm_0_result", "sm_2_result", "sm_5_result", "sm_6_result", "sm_8_result",
+  # 2023 split result fields
+  "sm_0_result_2023", "sm_2_result_2023", "sm_5_result_2023", "sm_end_result_2023"
+)
+
+# Xpert 
+bac_xpert_cols <- c(
+  "gx_0_result_2023"
+)
+
+# Culture
+bac_culture_cols <- c(
+  # 2023 split result fields
+  "c_0_result_2023", "c_2_result_2023", "c_5_result_2023", "c_end_result_2023"
+)
+
+# Template
+bac_template <- c(
+  "test", "result", "detail"
+)
+
+# Lookup paths
+lookup_smear  <- read_csv(here("data-raw", "unique_bac_smear_lookup.csv"), show_col_types = FALSE)
+lookup_xpert  <- read_csv(here("data-raw", "unique_bac_xpert_lookup.csv"), show_col_types = FALSE)
+lookup_culture   <- read_csv(here("data-raw", "unique_bac_culture_lookup.csv"), show_col_types = FALSE)
+
+# Output paths
+out_smear  <- file.path(current_dir, "unique_bac_smear.csv")
+out_xpert  <- file.path(current_dir, "unique_bac_xpert.csv")
+out_culture   <- file.path(current_dir, "unique_bac_culture.csv")
+
+# Export audit files
+
+export_unique_values_template(
+  data        = reg_combined,
+  target_cols = bac_smear_cols,
+  output_path = out_smear,
+  template_cols = bac_template,
+  lookup_data = lookup_smear,
+  counts      = TRUE,
+  unique_scope = "global"
+)
+
+export_unique_values_template(
+  data        = reg_combined,
+  target_cols = bac_xpert_cols,
+  output_path = out_xpert,
+  template_cols = bac_template,
+  lookup_data = lookup_xpert,
+  counts      = TRUE,
+  unique_scope = "global"
+)
+
+export_unique_values_template(
+  data        = reg_combined,
+  target_cols = bac_culture_cols,
+  output_path = out_culture,
+  template_cols = bac_template,
+  lookup_data = lookup_culture,
+  counts      = TRUE,
+  unique_scope = "global"
+)
+
+message("-> Bacteriology unique values audit exported (smear/xpert/culture).")
+
+
+
+## Classify bacteriology based on regex strings function and register data -----------------
+
+# Regex strings were determined from the unique values audit
+# Validated against lookup files for years were clean result is available
+# Screened to ensure bacteriology results during 2018-2022 are properly classified
+
+# Bacteriology column names
+bac_cols_all <- keep(names(reg_combined), ~ str_detect(.x, "^(sm|gx|c)_"))
+bac_cols_dx <- keep(bac_cols_all, ~ str_detect(.x, "_0_"))
+bac_cols_mon <- keep(bac_cols_all, ~ str_detect(.x, "_2_"))
+bac_cols_eot <- keep(bac_cols_all, ~ str_detect(.x, "_5_|_6_|_8_|_end"))
+
+reg_combined <- reg_combined %>%
+
+    # Build blobs (row-wise concatenation)
+  mutate(
+    bac_dx_blob = apply(select(., any_of(bac_cols_dx)), 1, function(row) paste(na.omit(row), collapse = " | ")),
+    bac_eot_blob = apply(select(., any_of(bac_cols_eot)), 1, function(row) paste(na.omit(row), collapse = " | ")),
+    bac_all_blob = apply(select(., any_of(bac_cols_all)), 1, function(row) paste(na.omit(row), collapse = " | "))
+  ) %>%
+  mutate(
+    across(
+      c(bac_dx_blob, bac_eot_blob, bac_all_blob),
+      ~ str_squish(str_trim(str_to_lower(.x)))
+    ),
+    across(
+      c(bac_dx_blob, bac_eot_blob, bac_all_blob),
+      ~ if_else(.x == "", NA_character_, .x)
+    )
+  ) %>%
+  
+  # Classify blobs using function
+  mutate(
+    bac_dx_cat  = vapply(bac_dx_blob,  classify_bac_blob, character(1)),
+    bac_eot_cat = vapply(bac_eot_blob, classify_bac_blob, character(1)),
+    bac_all_cat = vapply(bac_all_blob, classify_bac_blob, character(1))
+  ) %>%
+  
+  
+  mutate(
+    bc_reg_clean = str_squish(str_trim(str_to_lower(disease_site_bc_2017))),
+    cd_reg_clean = str_squish(str_trim(str_to_lower(disease_site_cd_2017))),
+    
+    # Categorical clean register interpretation for auditing
+    bc_cd_reg = case_when(
+      is.na(bc_reg_clean) & is.na(cd_reg_clean) ~ NA_character_,
+      
+      # One side present, other missing
+      bc_reg_clean %in% c("bc", "bd") & is.na(cd_reg_clean) ~ "bc",
+      cd_reg_clean == "cd" & is.na(bc_reg_clean)            ~ "cd",
+      
+      # Both present and concordant
+      bc_reg_clean %in% c("bc", "bd") & cd_reg_clean == "bc" ~ "bc", # rare, but handle
+      bc_reg_clean == "cd"            & cd_reg_clean == "cd" ~ "cd",
+      
+      # Both present but discordant (e.g., bc vs cd)
+      !is.na(bc_reg_clean) & !is.na(cd_reg_clean) & (
+        (bc_reg_clean %in% c("bc", "bd") & cd_reg_clean == "cd") |
+          (bc_reg_clean == "cd"            & cd_reg_clean %in% c("bc", "bd"))
+      ) ~ "disc",
+      
+      # Anything else unusual but present
+      TRUE ~ "disc"
+    ),
+    bc_cd_reg = factor(bc_cd_reg, levels = c("bc", "cd", "disc")),
+    
+    # Registration-derived binary BC flag
+    bc_reg_bin = case_when(
+      bc_reg_clean %in% c("bc", "bd") ~ TRUE,
+      TRUE ~ FALSE
+    ),
+    
+    # Derived from blobs (binary BC flags)
+    bc_dx_bin  = (bac_dx_cat  == "pos"),
+    bc_all_bin = (bac_all_cat == "pos"),
+    
+    # Composite rules (BC if any evidence)
+    bc_dx_comp_bin  = bc_dx_bin  | bc_reg_bin,
+    bc_all_comp_bin = bc_all_bin | bc_reg_bin
+  ) %>% 
+  
+  # organise columns
+  relocate(
+    disease_site_bc_2017, bc_reg_clean,
+    disease_site_cd_2017, cd_reg_clean,
+    bc_cd_reg,
+    any_of(bac_cols_dx), any_of(bac_cols_mon), any_of(bac_cols_eot),
+    bac_dx_blob, bac_dx_cat,
+    bac_eot_blob, bac_eot_cat,
+    bac_all_blob, bac_all_cat,
+    bc_reg_bin, bc_dx_bin, bc_all_bin,
+    bc_dx_comp_bin, bc_all_comp_bin,
+    .after = registration_category
+    )
+
+
+message("-> 2017 BC/CD cleaning and comparison complete.")
 
 
 
