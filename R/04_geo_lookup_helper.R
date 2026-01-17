@@ -27,7 +27,7 @@ if (!file.exists(geo_helper_path)) stop("! Geo helper (xlsx) not found.")
 # Load geo lookup table
 geo_lookup <- read_csv(geo_lookup_path, show_col_types = FALSE) %>%
   mutate(
-    clean_value = str_trim(str_to_lower(raw_value)),
+    clean_value = str_squish(str_trim(str_to_lower(raw_value))),
     across(contains("_manual"), ~str_trim(str_to_lower(as.character(.))))
     )
 
