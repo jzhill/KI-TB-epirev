@@ -56,7 +56,7 @@ reg_combined <- reg_combined_raw %>%
 # Output skim to .csv ------------
 
 skim_results <- reg_combined %>% 
-  skimr::skim() %>% 
+  skim() %>% 
   as_tibble()
 
 write_csv(skim_results, file.path(current_dir, "data_dictionary_raw_skim.csv"))
@@ -118,63 +118,192 @@ reg_combined <- reg_combined %>%
   # Position next to the numeric age
   relocate(age_group_10yr, age_group_who, age_group_new, .after = age_clean)
 
-# Geography & Address cleaning and mapping ----------------------------
+# Coded geography island/village from lookup ----------------------------
 
-## Use address lookup table to add coded island and ST village ----------------------
+## Setup and Reference Data -----------------------------------------------
 
-addr_lookup <- read_csv(here("data-raw", "TBreg_address_lookup_table.csv"), show_col_types = FALSE) %>%
+# File Paths
+geo_lookup_path <- here("data-raw", "unique_geo_lookup.csv")
+geo_helper_path <- here("data-raw", "geo_helper.xlsx")
+
+if (!file.exists(geo_lookup_path)) stop("! Geo lookup (csv) not found.")
+if (!file.exists(geo_helper_path)) stop("! Geo helper (xlsx) not found.")
+
+# Load Census Reference
+census_codes <- read_excel(geo_helper_path, sheet = "census_codes") %>%
+  mutate(across(everything(), ~str_trim(str_to_lower(as.character(.)))))
+
+# Load geo lookup table
+geo_lookup <- read_csv(geo_lookup_path, show_col_types = FALSE) %>%
+  mutate(clean_value = str_squish(str_trim(str_to_lower(raw_value)))) 
+
+# Define Official Lists for Template
+# Sorted by census code to preserve geographic/official order
+island_names <- census_codes %>% 
+  arrange(as.numeric(island_code)) %>% 
+  pull(island_name) %>% 
+  unique()
+
+island_codes <- census_codes %>% 
+  arrange(as.numeric(island_code)) %>% 
+  pull(island_code) %>% 
+  unique()
+
+division_names <- census_codes %>% 
+  arrange(as.numeric(division_code)) %>% 
+  pull(division_name) %>% 
+  unique()
+
+division_codes <- census_codes %>% 
+  arrange(as.numeric(division_code)) %>% 
+  pull(division_code) %>% 
+  unique()
+
+st_village_names <- census_codes %>% 
+  filter(island_name == "south tarawa") %>% 
+  arrange(as.numeric(village_code)) %>% # Assuming you have village_code
+  pull(village_name) %>% 
+  unique()
+
+nt_village_names <- census_codes %>% 
+  filter(island_name == "north tarawa") %>% 
+  arrange(as.numeric(village_code)) %>% 
+  pull(village_name) %>% 
+  unique()
+
+# Define column sets
+# ORDER MATTERS: The first column is the highest priority for resolution
+geo_cols <- c("address")
+# here are some other potential columns for later consideration
+# geo_cols <- c("address", "address_desc_2024", "treatment_unit", "school_2024")
+
+geo_template <- c(
+  "island", "island_search", "island_manual", 
+  "ST_village", "ST_village_search", "ST_village_manual", 
+  "NT_village", "NT_village_search", "NT_village_manual",
+  paste0("is_", island_names),
+  paste0("st_v_", st_village_names),
+  paste0("nt_v_", nt_village_names)
+)
+
+
+
+## Audit geo columns ----------------------------------------------------
+
+export_unique_values_template(
+  data = reg_combined,
+  target_cols = geo_cols,
+  output_path = file.path(current_dir, "unique_geo.csv"),
+  template_cols = geo_template,
+  lookup_data = geo_lookup
+)
+
+
+## Pivot register geo columns long ------------------------
+
+geo_long <- reg_combined %>%
+  select(tb_id, any_of(geo_cols)) %>%
+  pivot_longer(
+    cols = -tb_id,
+    names_to = "original_column",
+    values_to = "raw_value",
+    values_drop_na = TRUE
+    ) %>%
   mutate(
-    address_clean = str_trim(str_to_lower(address)),
-    # If the lookup string exists but island/village is missing, mark as "NR"
-    island_coded = if_else(is.na(island_coded) | island_coded == "Check", "NR", island_coded),
-    ST_village_coded = if_else(is.na(ST_village_coded) | ST_village_coded == "Check", "NR", ST_village_coded)
-  ) %>%
-  distinct(address_clean, .keep_all = TRUE) %>%
-  select(address_clean, island = island_coded, ST_village = ST_village_coded)
-
-# Perform the Join
-reg_combined <- reg_combined %>%
-  mutate(address_clean = str_trim(str_to_lower(address)), .after = address) %>%
-  select(-any_of(c("island", "ST_village"))) %>%
-  left_join(addr_lookup, by = "address_clean") %>%
-  relocate(island, ST_village, .after = address_clean)
-
-## Add island and division names and codes from lookup table --------------------
-
-# Load island census population table, which includes categories
-pop_island_census_file <- here("data-raw", "pop_island_census.csv")
-island_code_lookup <- read_csv(pop_island_census_file, show_col_types = FALSE)
-
-# Clean the 'Island' column (lowercase, trim) and use it as the join key 'island'.
-# Keep other required columns.
-
-island_code_lookup <- island_code_lookup %>%
-  mutate(
-    island = str_trim(str_to_lower(Island))
-  ) %>%
-  select(
-    island,
-    is_code,
-    division = Division,
-    div_code,
-    OI_ST
+    clean_value = str_trim(str_to_lower(raw_value)),
+    col_priority = factor(original_column, levels = geo_cols, ordered = TRUE)
   )
 
-## Perform left join using the cleaned island name ---------------------
+## Join to lookup table and summarise -------------------
 
-cols_to_add <- c("is_code", "division", "div_code", "OI_ST")
+geo_classified_wide <- geo_long %>%
+  left_join(
+    geo_lookup %>% select(original_column, clean_value, island, ST_village, NT_village),
+    by = c("original_column", "clean_value")
+    ) %>%
+  arrange(tb_id, col_priority) %>% 
+  group_by(tb_id) %>%
+  summarize(
+    
+    has_any_geo_data = TRUE,
+    
+    # Take the first non-NA result from the sorted priority list
+    island = first(na.omit(island)),
+    ST_village = first(na.omit(ST_village)),
+    NT_village = first(na.omit(NT_village)),
+    .groups = "drop"
+  )
+
+
+
+## Join results back to main register -------------
 
 reg_combined <- reg_combined %>%
   
-  # Remove columns first to ensure idempotency
-  select(-any_of(cols_to_add)) %>%
-  left_join(island_code_lookup, by = "island") %>%
-  mutate(division = if_else(island == "NR", "NR", division)) %>%
-  mutate(across(
-    c(island, ST_village, is_code, division, div_code, OI_ST), 
-    as.factor
-  )) %>%
-  relocate(all_of(cols_to_add), .after = island)
+  select(-any_of(colnames(geo_classified_wide)[-1])) %>% 
+  left_join(geo_classified_wide, by = "tb_id") %>%
+  
+  # Attach Official Census Codes and Divisions
+  left_join(
+    census_codes %>%
+      select(island_name, island_code, division = division_name, division_code) %>%
+      distinct(), 
+    by = c("island" = "island_name")
+  ) %>% 
+  
+  mutate(
+    
+    # If island is "nr", ensure division and codes are also "nr" instead of NA
+    across(c(division, division_code, island_code), 
+           ~if_else(island == "nr", "nr", as.character(.))),
+    
+    # island_ST_bin: TRUE only for South Tarawa
+    island_ST_bin = !is.na(island) & island == "south tarawa",
+    
+    # island_NT_bin: TRUE only for North Tarawa
+    island_NT_bin = !is.na(island) & island == "north tarawa",
+    
+    # ST_OI: "ST" (South Tarawa), "OI" (Outer Islands), or "NR" (Not Recorded)
+    ST_OI = case_when(
+      island == "south tarawa" ~ "ST",
+      island == "nr"           ~ "NR",
+      !is.na(island)           ~ "OI", # All other matched islands are Outer Islands
+      TRUE                     ~ NA_character_
+    )
+  ) %>%
+  
+  # Organize the new columns after joining
+  relocate(
+    has_any_geo_data, ST_OI, 
+    division, division_code,
+    island, island_code,  
+    ST_village, NT_village, 
+    island_ST_bin, island_NT_bin, 
+    .after = address
+    ) %>% 
+  
+  # Ensure geo codes are factors using the census code ordering
+  mutate(
+    # 1. Divisions
+    division = factor(division, levels = c(division_names, "nr")),
+    division_code = factor(division_code, levels = c(division_codes, "nr")),
+    
+    # 2. Islands (Ordered North to South based on census codes)
+    island = factor(island, levels = c(island_names, "nr")),
+    island_code   = factor(island_code, levels = c(island_codes, "nr")),
+    
+    # 3. Villages
+    ST_village = factor(ST_village, levels = c(st_village_names, "nr")),
+    NT_village = factor(NT_village, levels = c(nt_village_names, "nr")),
+    
+    # 4. ST_OI Grouping
+    ST_OI = factor(ST_OI, levels = c("ST", "OI", "NR"))
+  )
+
+message("-> Geography classification complete.")
+
+
+
 
 
 # Coded disease types and sites from lookup ------------------------
@@ -224,29 +353,29 @@ disease_template <- c(
 )
 
 
+## Load and prepare the disease lookup file -----------------------
+
+disease_lookup_path <- here("data-raw", "unique_disease_sites_lookup.csv")
+if (!file.exists(disease_lookup_path)) stop("! Disease lookup not found.")
+
+disease_lookup <- read_csv(disease_lookup_path, show_col_types = FALSE) %>%
+  mutate(clean_value = str_squish(str_trim(str_to_lower(raw_value)))) %>%
+  select(original_column, clean_value, ptb_eptb, matches("^(type_|site_)"))
+
+
 ## Audit Disease Sites ----------------------------------------------------
 
 export_unique_values_template(
   data = reg_combined,
   target_cols = disease_cols,
   output_path = file.path(current_dir, "unique_disease_sites.csv"),
-  template_cols = disease_template
+  template_cols = disease_template,
+  lookup_data = disease_lookup
 )
 
 
 
-## Load and prepare the disease lookup file -----------------------
-
-disease_lookup_path <- here("data-raw", "disease_site_lookup_table.csv")
-if (!file.exists(disease_lookup_path)) stop("! Disease lookup not found.")
-
-disease_lookup <- read_csv(disease_lookup_path, show_col_types = FALSE) %>%
-  mutate(clean_value = str_trim(str_to_lower(raw_value))) %>%
-  select(original_column, clean_value, ptb_eptb, matches("^(type_|site_)"))
-
-
 ## Pivot register disease columns long ---------------------------------------
-
 
 disease_long <- reg_combined %>%
   select(tb_id, any_of(disease_cols)) %>%
@@ -256,16 +385,12 @@ disease_long <- reg_combined %>%
     values_to = "raw_value",
     values_drop_na = TRUE
   ) %>%
-  mutate(clean_value = str_trim(str_to_lower(raw_value)))
+  mutate(clean_value = str_squish(str_trim(str_to_lower(raw_value))))
 
-## Join to your Lookup Table -------------------------------------------
+## Join to lookup table and summarise -------------------------------------------
 
-disease_classified_long <- disease_long %>%
-  left_join(disease_lookup, by = c("original_column", "clean_value"))
-
-## Summarise back to one row per patient -------------------------------
-
-disease_final_summary <- disease_classified_long %>%
+disease_classified_wide <- disease_long %>%
+  left_join(disease_lookup, by = c("original_column", "clean_value")) %>% 
   group_by(tb_id) %>%
   summarize(
     
@@ -290,14 +415,118 @@ disease_final_summary <- disease_classified_long %>%
 ## Join results back to main register -------------
 
 reg_combined <- reg_combined %>%
-  select(-any_of(colnames(disease_final_summary)[-1])) %>% 
-  left_join(disease_final_summary, by = "tb_id") %>%
+  select(-any_of(colnames(disease_classified_wide)[-1])) %>% 
+  left_join(disease_classified_wide, by = "tb_id") %>%
+  
+  # Make sure that ptb_eptb is a categorical factor with levels
   mutate(ptb_eptb = factor(ptb_eptb, levels = c("PTB", "EPTB"))) %>%
   
-  # Organize the new columns
-  relocate(ptb_eptb, starts_with("type_"), starts_with("site_"), .after = disease_site)
+  # Organize the new columns after joining
+  relocate(has_any_disease_data, ptb_eptb, starts_with("type_"), starts_with("site_"), .after = disease_site)
 
 message("-> Disease classification complete.")
+
+
+
+# Registration Category from lookup ---------------------------------------
+
+## Define category column sets --------------------------------------------
+
+cat_cols <- c(
+  "cat_new", "cat_relapse", "cat_failure", 
+  "cat_rad", "cat_tf_in", "cat_others",
+  "cat_ltfu_2018", "cat_unknown_2018", "cat_failure_dup"
+)
+
+# These are the clean columns we want in our final register
+cat_template <- c(
+  "registration_category" # The final single-choice factor
+)
+
+# 1. Define the "Master List" of valid category codes
+valid_cat_codes <- c("new", "relapse", "failure", "ltfu", "tf_in", "other", "unknown", "nr")
+
+## Load and prepare the category lookup file -----------------------
+
+cat_lookup_path <- here("data-raw", "unique_registration_category_lookup.csv")
+if (!file.exists(cat_lookup_path)) stop("! Category lookup not found.")
+
+cat_lookup <- read_csv(cat_lookup_path, show_col_types = FALSE) %>%
+  mutate(
+    clean_value = str_trim(str_to_lower(raw_value)),
+    registration_category = str_trim(str_to_lower(registration_category))
+  ) %>% 
+  mutate(registration_category = if_else(
+    registration_category %in% valid_cat_codes, 
+    registration_category, 
+    NA_character_
+  ))
+
+## Audit Registration Categories -------------------------------------------
+
+export_unique_values_template(
+  data = reg_combined,
+  target_cols = cat_cols,
+  output_path = file.path(current_dir, "unique_registration_category.csv"),
+  template_cols = cat_template,
+  lookup_data = cat_lookup
+)
+
+## Pivot register category columns long ------------------------------------
+
+cat_long <- reg_combined %>%
+  select(tb_id, any_of(cat_cols)) %>%
+  pivot_longer(
+    cols = -tb_id, 
+    names_to = "original_column", 
+    values_to = "raw_value",
+    values_drop_na = TRUE
+  ) %>%
+  mutate(clean_value = str_squish(str_trim(str_to_lower(raw_value))))
+
+## Join and Resolve -------------------------------------------------------
+
+cat_classified_wide <- cat_long %>%
+  left_join(cat_lookup, by = c("original_column", "clean_value")) %>%
+  filter(!is.na(registration_category)) %>%
+  group_by(tb_id) %>%
+  summarize(
+    
+    # How many categories have been matched for the patient
+    cat_count = n_distinct(registration_category),
+    
+    # Only give a category if one matches
+    registration_category = case_when(
+      cat_count == 1 ~ first(registration_category),
+      cat_count  > 1 ~ NA_character_, # Conflict!
+      TRUE           ~ NA_character_
+    ),
+    .groups = "drop"
+  )
+
+## Join results back to main register -------------------------------------
+
+reg_combined <- reg_combined %>%
+  select(-any_of("registration_category")) %>% 
+  left_join(cat_classified_wide, by = "tb_id") %>%
+  
+  # Convert to Factor with Proper Labels
+  mutate(registration_category = factor(
+    registration_category, 
+    levels = c("new", "relapse", "failure", "ltfu", "tf_in", "other", "unknown", "nr"),
+    labels = c("New", "Relapse", "Treatment after failure", "Treatment after LTFU", 
+               "Transfer in", "Other", "Unknown", "Not recorded")
+  )) %>%
+  
+  # Organize
+  select(-any_of("cat_count")) %>%
+  relocate(cat_ltfu_2018, cat_unknown_2018, cat_failure_dup, registration_category, .after = cat_others)
+
+message("-> Registration category classification complete.")
+
+
+
+
 
 
 # Batch Error Logging ------------------------------------
@@ -305,7 +534,7 @@ message("-> Disease classification complete.")
 message("Batch auditing cleaning results...")
 
 # Define what to check
-cleaning_map <- tibble::tribble(
+cleaning_map <- tribble(
   ~raw,                     ~clean,             ~msg,
   "date_registered",        "date_reg_clean",   "Date invalid or outside range",
   "date_started",           "date_start_clean", "Date invalid or outside range",
@@ -315,7 +544,7 @@ cleaning_map <- tibble::tribble(
   # Geography Audits
   "address",                "island",           "Address string not found in lookup table",
   "island",                 "division",         "Island name not found in census lookup",
-  
+
   # Disease Classification Audits
   "disease_site",           "ptb_eptb",         "Disease string missing from lookup (Site)",
   "disease_site_pulm_2018", "ptb_eptb",         "Disease string missing from lookup (Pulm 2018)",
