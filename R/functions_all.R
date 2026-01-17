@@ -3,17 +3,17 @@
 
 # Dependency Imports ---------------------------------------
 
-import::from(stringr, str_trim, str_extract, str_pad, str_match, str_replace_all, str_to_upper, str_to_lower, str_length, str_squish)
-import::from(dplyr, filter, select, mutate, group_by, summarize, all_of, across, relocate, case_match, case_when, if_else, pull)
-import::from(purrr, map_df, discard, map_chr)
-import::from(rlang, sym)
-import::from(lubridate, parse_date_time, year)
-import::from(readxl, read_excel)
-import::from(tools, file_path_sans_ext)
+import::from(dplyr, across, any_of, case_match, case_when, filter, group_by, if_else, mutate, pull, relocate, select, summarize)
 import::from(epikit, age_categories)
+import::from(lubridate, parse_date_time, year)
+import::from(purrr, discard, map_chr, map_df)
+import::from(readr, write_csv)
+import::from(readxl, read_excel)
+import::from(rlang, sym)
+import::from(stringr, str_detect, str_extract, str_length, str_match, str_pad, str_replace_all, str_squish, str_to_lower, str_to_upper, str_trim)
 import::from(tidyr, pivot_longer)
 import::from(tidyselect, all_of, everything)
-import::from(readr, write_csv)
+import::from(tools, file_path_sans_ext)
 
 # I/O & File Management ------------------------------------
 
@@ -182,10 +182,16 @@ generate_error_log <- function(data, validation_map) {
 }
 
 
+
+
 # Generates a unique value audit CSV for a set of columns
 export_unique_values_template <- function(data, target_cols, output_path,
                                           template_cols = NULL,
-                                          lookup_data = NULL) {
+                                          lookup_data = NULL,
+                                          counts = FALSE,
+                                          unique_scope = c("by_column", "global")) {
+  
+  unique_scope <- match.arg(unique_scope)
   
   # 1. Identify and report which requested columns actually exist in this data version
   
@@ -207,7 +213,7 @@ export_unique_values_template <- function(data, target_cols, output_path,
   }
   
   # 2. Pivot and Clean
-  current_uniques <- data %>%
+  current_long <- data %>%
     select(all_of(present_cols)) %>%
     pivot_longer(
       cols = everything(),
@@ -215,21 +221,75 @@ export_unique_values_template <- function(data, target_cols, output_path,
       values_to = "raw_value",
       values_drop_na = TRUE
     ) %>%
-    mutate(clean_value = str_squish(str_trim(str_to_lower(raw_value)))) %>%
-    filter(clean_value != "") %>%
-    distinct(original_column, clean_value, .keep_all = TRUE) %>%
-    arrange(original_column, clean_value)
+    mutate(
+      # CHANGE: now squish internal whitespace (must match 02_ join-key cleaning)
+      clean_value = str_squish(str_trim(str_to_lower(raw_value)))
+    ) %>%
+    filter(clean_value != "")
   
-  # 3. If a lookup already exists, merge the old coding into the new uniques
-  if (!is.null(lookup_data)) {
-    message("-> Pre-filling audit with existing lookup data...")
+  # 3. Collapse to uniques (+ optional counts), by chosen scope
+  if (unique_scope == "by_column") {
     
-    # We join based on the context (column + clean_value)
-    current_uniques <- current_uniques %>%
-      left_join(
-        lookup_data %>% select(-any_of("raw_value")), # Don't duplicate raw_value
-        by = c("original_column", "clean_value")
+    if (isTRUE(counts)) {
+      current_uniques <- current_long %>%
+        count(original_column, clean_value, name = "n") %>%
+        arrange(desc(n), original_column, clean_value)
+    } else {
+      current_uniques <- current_long %>%
+        distinct(original_column, clean_value, .keep_all = TRUE) %>%
+        arrange(original_column, clean_value)
+    }
+    
+    # 3b. If a lookup already exists, merge the old coding into the new uniques
+    if (!is.null(lookup_data)) {
+      message("-> Pre-filling audit with existing lookup data...")
+      
+      # We join based on the context (column + clean_value)
+      current_uniques <- current_uniques %>%
+        left_join(
+          lookup_data %>% select(-any_of("raw_value")), # Don't duplicate raw_value
+          by = c("original_column", "clean_value")
+        )
+    }
+    
+  } else {
+    
+    # Global uniques: one row per clean_value across all audited columns
+    if (isTRUE(counts)) {
+      current_uniques <- current_long %>%
+        count(clean_value, name = "n") %>%
+        arrange(desc(n), clean_value)
+    } else {
+      current_uniques <- current_long %>%
+        distinct(clean_value, .keep_all = FALSE) %>%
+        arrange(clean_value)
+    }
+    
+    # Add context: which columns each value appears in
+    columns_ctx <- current_long %>%
+      distinct(clean_value, original_column) %>%
+      group_by(clean_value) %>%
+      summarise(
+        columns_present = paste(sort(unique(original_column)), collapse = " | "),
+        .groups = "drop"
       )
+    
+    current_uniques <- current_uniques %>%
+      left_join(columns_ctx, by = "clean_value")
+    
+    # Lookup join in global mode only if lookup_data is also global (no original_column)
+    if (!is.null(lookup_data)) {
+      if (!"original_column" %in% colnames(lookup_data)) {
+        message("-> Pre-filling audit with existing lookup data...")
+        current_uniques <- current_uniques %>%
+          left_join(
+            lookup_data %>% select(-any_of("raw_value")),
+            by = "clean_value"
+          )
+      } else {
+        message("! Note: lookup_data contains original_column, so it cannot be safely joined in global mode. Skipping lookup join.")
+      }
+    }
   }
   
   # 4. Add blank template columns if requested
@@ -247,6 +307,8 @@ export_unique_values_template <- function(data, target_cols, output_path,
   
   return(current_uniques)
 }
+
+
 
 # Defensive TB number formatter (Extracts digits then pads)
 format_tb_number <- function(tb_no_vector, width = 4) {
@@ -328,3 +390,79 @@ clean_sex_column <- function(sex_vector) {
   # Return as a factor with explicit levels
   return(factor(standardized, levels = c("Male", "Female")))
 }
+
+
+
+# Classify bacteriology blob 
+# Input: blob (character scalar, already squished/trimmed/lower is fine; function is defensive)
+# Output: pos / neg / nr / NA
+classify_bac_blob <- function(blob) {
+  
+  if (is.na(blob)) return(NA_character_)
+  x <- str_squish(str_trim(str_to_lower(blob)))
+  if (x == "") return(NA_character_)
+  
+  # patterns
+  
+  # Positive evidence across tests:
+  # - smear grades / scanty / AFB counts
+  # - culture positive shorthand
+  # - xpert trace/detected and RR language
+  
+  pos_patterns <- c(
+    # smear
+    "\\bscanty\\b", "\\bsc\\b", "(?<!\\d)[123]\\+(?!\\d)",
+    "\\b\\d+\\s*afb\\b", "\\b\\d+\\s*/\\s*100\\s*field", "\\b\\d+\\s*/\\s*100\\s*fields", "ve\\+",
+    # culture
+    "\\bc/pos\\b", "\\bc/p\\b", "\\bculture\\s*/\\s*pos\\b", "\\bculture\\s*pos\\b",
+    # generic positives
+    "\\bpos\\b", "\\bpositive\\b", "\\bve\\+\\b", "ve\\+\\.",
+    # xpert pos tokens
+    "\\btx\\b", "\\btrace\\b", "\\btnr\\b", "\\bt\\(", "\\bt\\b", "\\btl\\)", "\\bti\\b",
+    # detected (handled carefully to avoid not detected)
+    "\\bdetected\\b",
+    # RR language
+    "\\brif\\s*resistant\\b", "\\brr\\s*tb\\s*detected\\b", "\\brr\\b", "rif\\s*resist"
+  )
+  
+  # Negative evidence across tests
+  
+  neg_patterns <- c(
+    "\\bneg\\b", "\\bneg(?=\\d)", "\\bneg(?=[a-z])", "\\bnegative\\b", "\\bn\\b",
+    "\\bnd\\b", "\\bn\\.d\\b", "\\bn\\s*d\\b",
+    "\\bnot\\s*detected\\b",
+    "rpt\\s*-?\\s*\\d+\\s*days\\s*-\\s*neg"
+  )
+  
+  # NR markers (recorded but not interpretable)
+  
+  nr_patterns <- c(
+    "\\bo/s\\b",
+    "cartridge", "stock", "low\\s*cartridge", "low\\s*stock",
+    "lab\\s*form\\s*lost",
+    "no\\s*flight",
+    "pus\\s*/\\s*swb", "pus/swb",
+    "\\be/p\\b"
+  )
+  
+  # classification logic
+  
+  # Avoid false pos from "detected" inside "not detected"
+  x_no_notdet <- str_replace_all(x, "not\\s*detected", " ")
+  
+  has_pos <- any(str_detect(x_no_notdet, pos_patterns))
+  if (has_pos) return("pos")
+  
+  has_neg <- any(str_detect(x, neg_patterns))
+  if (has_neg) return("neg")
+  
+  # If text exists but no matches, still "nr"
+  # NR markers are not required; they just document known non-result tokens
+  has_nr_marker <- any(str_detect(x, nr_patterns))
+  if (has_nr_marker) return("nr")
+  
+  "nr"
+}
+
+
+
