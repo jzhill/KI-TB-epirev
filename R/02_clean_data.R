@@ -703,6 +703,66 @@ message("-> 2017 BC/CD cleaning and comparison complete.")
 
 
 
+# Regimen -----------------------------------
+
+## Setup -----------------
+
+reg_combined <- reg_combined %>%
+  mutate(regimen_clean = str_squish(str_trim(str_to_lower(regimen))))
+
+
+regimen_template <- c(
+  "regimen_factor",  # cat1 / cat2 / cat3
+  "regimen_note"    # modifiers, toxicity, free text
+)
+
+valid_regimen_codes <- c("cat1", "cat2", "cat3")
+
+regimen_lookup_path <- here("data-raw", "unique_regimen_lookup.csv")
+if (!file.exists(regimen_lookup_path)) stop("! Regimen lookup not found.")
+
+regimen_lookup <- read_csv(regimen_lookup_path, show_col_types = FALSE) %>%
+  mutate(
+    regimen_factor = str_squish(str_trim(str_to_lower(regimen_factor))),
+    regimen_factor = if_else(regimen_factor %in% valid_regimen_codes, regimen_factor, NA_character_)
+  )
+
+## Create audit file -----------------
+
+export_unique_values_template(
+  data = reg_combined,
+  target_cols = c("regimen_clean"),
+  output_path = file.path(current_dir, "unique_regimen.csv"),
+  template_cols = regimen_template,
+  lookup_data = regimen_lookup,
+  counts = TRUE,
+  unique_scope = "global"
+)
+
+message("-> Regimen audit exported.")
+
+## Join from lookup and tidy up --------------------
+
+reg_combined <- reg_combined %>%
+  select(-any_of(regimen_template)) %>%  # idempotent
+  left_join(
+    regimen_lookup %>% select(clean_value, any_of(regimen_template)),
+    by = c("regimen_clean" = "clean_value")
+  ) %>% 
+  mutate(
+
+    # Regimen factor with labels
+    regimen_factor = factor(
+      regimen_factor,
+      levels = valid_regimen_codes,
+      labels = c("Category 1", "Category 2", "Category 3")
+    )
+  )
+
+
+regimen_cols <- c("regimen", "regimen_clean", regimen_template)
+
+
 
 # Treatment outcomes -----------------
 
@@ -860,7 +920,7 @@ reg_combined <- reg_combined %>%
     # Outcome factor with labels
     outcome_factor = factor(
       outcome_factor,
-      levels = c("cured", "completed", "failed", "died", "ltfu", "tf_out", "ne", "sld"),
+      levels = valid_outcome_codes,
       labels = c(
         "Cured",
         "Treatment completed",
@@ -886,6 +946,7 @@ final_order <- c(
   demo_cols,
   geo_cols,
   disease_cols,
+  regimen_cols,
   cat_cols,
   bac_cols,
   outcome_cols
