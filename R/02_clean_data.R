@@ -34,10 +34,9 @@ if (!file.exists(raw_path)) stop("Raw file not found in: ", current_dir)
 
 reg_combined_raw <- qread(raw_path)
 
-# Initial cleaning ------------------
+# ID and demographics ------------------
 
-# Initialize the error log collector
-error_log <- list()
+## Initial cleaning and tb_id -----------------------
 
 reg_combined <- reg_combined_raw %>%
 
@@ -48,12 +47,10 @@ reg_combined <- reg_combined_raw %>%
   mutate(
     tb_no_clean = format_tb_number(tb_no),
     tb_id = paste0(reg_year, "_", tb_no_clean)
-  ) %>%
+  )
   
-  relocate(tb_no_clean, .after = tb_no) %>%
-  relocate(tb_id, .before = 1)
-
-# Output skim to .csv ------------
+  
+# Output skim to .csv
 
 skim_results <- reg_combined %>% 
   skim() %>% 
@@ -61,7 +58,7 @@ skim_results <- reg_combined %>%
 
 write_csv(skim_results, file.path(current_dir, "data_dictionary_raw_skim.csv"))
 
-# Clean dates age and sex ------------------------------------------
+## Dates age and sex ------------------------------------------
 
 reg_combined <- reg_combined %>%
   mutate(
@@ -74,14 +71,9 @@ reg_combined <- reg_combined %>%
     
     # Sex
     sex_clean = clean_sex_column(sex)
-  ) %>%
-  
-  relocate(date_reg_clean, .after = date_registered) %>%
-  relocate(date_start_clean, .after = date_started) %>%
-  relocate(age_clean, .after = age) %>%
-  relocate(sex_clean, .after = sex)
+  ) 
 
-# Create age group columns ------------------------------------------
+## Age groups ------------------------------------------
 
 # Set parameters for grouping
 
@@ -114,9 +106,16 @@ reg_combined <- reg_combined %>%
       breakers = age_breaks_new
     )
     
-  ) %>%
-  # Position next to the numeric age
-  relocate(age_group_10yr, age_group_who, age_group_new, .after = age_clean)
+  ) 
+
+demo_cols <- c(
+  "tb_id", "tb_no", "tb_no_clean", "reg_year", "month_ref",
+  "date_registered", "date_reg_clean", "date_started", "date_start_clean",
+  "name", "age", "age_clean", "age_group_10yr", "age_group_who", "age_group_new", "sex", "sex_clean"
+)
+
+
+
 
 # Geography island/village ----------------------------
 
@@ -173,9 +172,9 @@ nt_village_names <- census_codes %>%
 
 # Define column sets
 # ORDER MATTERS: The first column is the highest priority for resolution
-geo_cols <- c("address")
+geo_cols_raw <- c("address")
 # here are some other potential columns for later consideration
-# geo_cols <- c("address", "address_desc_2024", "treatment_unit", "school_2024")
+# geo_cols_raw <- c("address", "address_desc_2024", "treatment_unit", "school_2024", "card_location_2018")
 
 geo_template <- c(
   "island", "island_search", "island_manual", 
@@ -192,7 +191,7 @@ geo_template <- c(
 
 export_unique_values_template(
   data = reg_combined,
-  target_cols = geo_cols,
+  target_cols = geo_cols_raw,
   output_path = file.path(current_dir, "unique_geo.csv"),
   template_cols = geo_template,
   lookup_data = geo_lookup
@@ -202,7 +201,7 @@ export_unique_values_template(
 ## Pivot register geo columns long ------------------------
 
 geo_long <- reg_combined %>%
-  select(tb_id, any_of(geo_cols)) %>%
+  select(tb_id, any_of(geo_cols_raw)) %>%
   pivot_longer(
     cols = -tb_id,
     names_to = "original_column",
@@ -211,7 +210,7 @@ geo_long <- reg_combined %>%
     ) %>%
   mutate(
     clean_value = str_squish(str_trim(str_to_lower(raw_value))),
-    col_priority = factor(original_column, levels = geo_cols, ordered = TRUE)
+    col_priority = factor(original_column, levels = geo_cols_raw, ordered = TRUE)
   )
 
 ## Join to lookup table and summarise -------------------
@@ -272,16 +271,6 @@ reg_combined <- reg_combined %>%
     )
   ) %>%
   
-  # Organize the new columns after joining
-  relocate(
-    has_any_geo_data, ST_OI, 
-    division, division_code,
-    island, island_code,  
-    ST_village, NT_village, 
-    island_ST_bin, island_NT_bin, 
-    .after = address
-    ) %>% 
-  
   # Ensure geo codes are factors using the census code ordering
   mutate(
     # 1. Divisions
@@ -300,6 +289,13 @@ reg_combined <- reg_combined %>%
     ST_OI = factor(ST_OI, levels = c("ST", "OI", "NR"))
   )
 
+geo_cols <- c(
+  "address", "treatment_unit", "card_location_2018", "address_desc_2024", "school_2024",
+  "has_any_geo_data", "ST_OI", "division", "division_code", "island", "island_code",  
+  "ST_village", "NT_village", "island_ST_bin", "island_NT_bin"
+  )
+
+
 message("-> Geography classification complete.")
 
 
@@ -310,7 +306,7 @@ message("-> Geography classification complete.")
 
 ## Define disease column sets ----------------------------------------------------
 
-disease_cols <- c(
+disease_cols_raw <- c(
   "disease_site",
   "disease_site_pulm_2018",
   "disease_site_ep_2018"
@@ -367,7 +363,7 @@ disease_lookup <- read_csv(disease_lookup_path, show_col_types = FALSE) %>%
 
 export_unique_values_template(
   data = reg_combined,
-  target_cols = disease_cols,
+  target_cols = disease_cols_raw,
   output_path = file.path(current_dir, "unique_disease_sites.csv"),
   template_cols = disease_template,
   lookup_data = disease_lookup
@@ -378,7 +374,7 @@ export_unique_values_template(
 ## Pivot register disease columns long ---------------------------------------
 
 disease_long <- reg_combined %>%
-  select(tb_id, any_of(disease_cols)) %>%
+  select(tb_id, any_of(disease_cols_raw)) %>%
   pivot_longer(
     cols = -tb_id, 
     names_to = "original_column", 
@@ -419,10 +415,9 @@ reg_combined <- reg_combined %>%
   left_join(disease_classified_wide, by = "tb_id") %>%
   
   # Make sure that ptb_eptb is a categorical factor with levels
-  mutate(ptb_eptb = factor(ptb_eptb, levels = c("PTB", "EPTB"))) %>%
-  
-  # Organize the new columns after joining
-  relocate(any_of(disease_cols), has_any_disease_data, ptb_eptb, starts_with("type_"), starts_with("site_"), .after = date_start_clean)
+  mutate(ptb_eptb = factor(ptb_eptb, levels = c("PTB", "EPTB"))) 
+
+disease_cols <- c(disease_cols_raw, "has_any_disease_data", disease_template)
 
 message("-> Disease classification complete.")
 
@@ -432,7 +427,7 @@ message("-> Disease classification complete.")
 
 ## Define category column sets --------------------------------------------
 
-cat_cols <- reg_combined_raw %>%
+cat_cols_raw <- reg_combined_raw %>%
   select(starts_with("cat_")) %>%
   colnames()
 
@@ -449,8 +444,8 @@ valid_cat_codes <- c("new", "relapse", "failure", "ltfu", "tf_in", "other", "unk
 reg_combined <- reg_combined %>%
   mutate(
     cat_n = rowSums(
-      !is.na(select(., any_of(cat_cols))) &
-        select(., any_of(cat_cols)) != "",
+      !is.na(select(., any_of(cat_cols_raw))) &
+        select(., any_of(cat_cols_raw)) != "",
       na.rm = TRUE
     ),
     
@@ -479,7 +474,7 @@ cat_lookup <- read_csv(cat_lookup_path, show_col_types = FALSE) %>%
 
 export_unique_values_template(
   data = reg_combined,
-  target_cols = cat_cols,
+  target_cols = cat_cols_raw,
   output_path = file.path(current_dir, "unique_category.csv"),
   template_cols = cat_template,
   lookup_data = cat_lookup
@@ -488,7 +483,7 @@ export_unique_values_template(
 ## Pivot register category columns long ------------------------------------
 
 cat_long <- reg_combined %>%
-  select(tb_id, any_of(cat_cols)) %>%
+  select(tb_id, any_of(cat_cols_raw)) %>%
   pivot_longer(
     cols = -tb_id, 
     names_to = "original_column", 
@@ -531,9 +526,11 @@ reg_combined <- reg_combined %>%
                "Transfer in", "Other", "Unknown", "Not recorded")
   )) %>%
   
-  # Organize
-  select(-any_of("cat_n_mapped")) %>%
-  relocate(any_of(cat_cols), cat_factor, .after = site_ento)
+  # Remove
+  select(-any_of("cat_n_mapped")) 
+
+
+cat_cols <- c(cat_cols_raw, "cat_n", "cat_factor")
 
 message("-> Registration category classification complete.")
 
@@ -693,21 +690,13 @@ reg_combined <- reg_combined %>%
     # Composite rules (BC if any evidence)
     bc_dx_comp_bin  = bc_dx_bin  | bc_reg_bin,
     bc_all_comp_bin = bc_all_bin | bc_reg_bin
-  ) %>% 
-  
-  # organise columns
-  relocate(
-    disease_site_bc_2017, bc_reg_clean,
-    disease_site_cd_2017, cd_reg_clean,
-    bc_cd_reg,
-    any_of(bac_cols_dx), any_of(bac_cols_mon), any_of(bac_cols_eot),
-    bac_dx_blob, bac_dx_cat,
-    bac_eot_blob, bac_eot_cat,
-    bac_all_blob, bac_all_cat,
-    bc_reg_bin, bc_dx_bin, bc_all_bin,
-    bc_dx_comp_bin, bc_all_comp_bin,
-    .after = cat_factor
-    )
+  ) 
+
+bac_cols <- c(
+  "disease_site_bc_2017", "bc_reg_clean", "disease_site_cd_2017", "cd_reg_clean", "bc_cd_reg",
+  bac_cols_dx, bac_cols_mon, bac_cols_eot,
+  "bac_dx_blob", "bac_dx_cat", "bac_eot_blob", "bac_eot_cat", "bac_all_blob", "bac_all_cat",
+  "bc_reg_bin", "bc_dx_bin", "bc_all_bin", "bc_dx_comp_bin", "bc_all_comp_bin")
 
 
 message("-> 2017 BC/CD cleaning and comparison complete.")
@@ -718,12 +707,12 @@ message("-> 2017 BC/CD cleaning and comparison complete.")
 # Treatment outcomes -----------------
 
 # Identify outcome columns
-outcome_cols <- reg_combined_raw %>%
+outcome_cols_raw <- reg_combined_raw %>%
   select(starts_with("outcome_")) %>%
   colnames()
 
 # Define valid outcome codes
-valid_outcome_codes <- c("cured", "completed", "failure", "died", "ltfu", "tf_out", "ne", "sld")
+valid_outcome_codes <- c("cured", "completed", "failed", "died", "ltfu", "tf_out", "ne", "sld")
 
 
 ## Load and prepare the outcome lookup file -----------------------
@@ -743,8 +732,8 @@ outcome_lookup <- read_csv(outcome_lookup_path, show_col_types = FALSE) %>%
 reg_combined <- reg_combined %>%
   mutate(
     outcome_n = rowSums(
-      !is.na(select(., any_of(outcome_cols))) &
-        select(., any_of(outcome_cols)) != "",
+      !is.na(select(., any_of(outcome_cols_raw))) &
+        select(., any_of(outcome_cols_raw)) != "",
       na.rm = TRUE
     ),
     outcome_n = if_else(outcome_n == 0, NA_integer_, outcome_n)
@@ -752,9 +741,9 @@ reg_combined <- reg_combined %>%
 
 # Build per-patient keyed string: "outcome_x: <value> | outcome_y: <value>"
 outcome_key_df <- reg_combined %>%
-  select(tb_id, any_of(outcome_cols)) %>%
+  select(tb_id, any_of(outcome_cols_raw)) %>%
   pivot_longer(
-    cols = any_of(outcome_cols),
+    cols = any_of(outcome_cols_raw),
     names_to = "outcome_col",
     values_to = "outcome_val",
     values_drop_na = TRUE
@@ -785,7 +774,7 @@ reg_combined <- reg_combined %>%
   mutate(
     outcome_date = if_else(
       outcome_n == 1,
-      apply(select(., any_of(outcome_cols)), 1, function(row) {
+      apply(select(., any_of(outcome_cols_raw)), 1, function(row) {
         x <- row[!is.na(row) & row != ""]
         if (length(x) == 1) as.character(x) else NA_character_
       }),
@@ -793,8 +782,8 @@ reg_combined <- reg_combined %>%
     ),
     outcome_factor = if_else(
       outcome_n == 1,
-      apply(select(., any_of(outcome_cols)), 1, function(row) {
-        nm <- outcome_cols[!is.na(row) & row != ""]
+      apply(select(., any_of(outcome_cols_raw)), 1, function(row) {
+        nm <- outcome_cols_raw[!is.na(row) & row != ""]
         if (length(nm) == 1) str_remove(nm, "^outcome_") else NA_character_
       }),
       NA_character_
@@ -884,8 +873,30 @@ reg_combined <- reg_combined %>%
       )
     )
   ) %>%
-  select(-any_of(c("outcome_factor_manual", "outcome_date_manual"))) %>% 
-  relocate(any_of(outcome_cols), outcome_n, outcome_key, outcome_factor, outcome_date, .after = bc_all_comp_bin)
+  select(-any_of(c("outcome_factor_manual", "outcome_date_manual"))) 
+
+
+outcome_cols <- c(outcome_cols_raw, "outcome_n", "outcome_key", "outcome_factor", "outcome_date")
+
+
+
+# Organise columns ---------------------------
+
+final_order <- c(
+  demo_cols,
+  geo_cols,
+  disease_cols,
+  cat_cols,
+  bac_cols,
+  outcome_cols
+)
+
+reg_combined <- reg_combined %>%
+  select(any_of(final_order), everything())
+
+
+ungrouped_cols <- setdiff(names(reg_combined), final_order)
+ungrouped_cols
 
 
 
@@ -915,7 +926,8 @@ cleaning_map <- tribble(
   "disease_site_ep_2018",   "ptb_eptb",         "Disease string missing from lookup (EP 2018)",
   
   "cat_n",                  "cat_factor",       "Treatment category not assigned from lookup",
-  "outcome_key",            "outcome_factor",   "Outcome category not assigned from columns"
+  "outcome_key",            "outcome_factor",   "Outcome category not assigned from columns",
+  "outcome_key",            "outcome_date",     "Outcome date not assigned from columns"
 )
 
 # Generate the log in one command
