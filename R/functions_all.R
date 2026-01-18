@@ -169,12 +169,10 @@ generate_error_log <- function(data, validation_map) {
     data %>%
       # Find rows where original had data but clean version is NA
       filter(!is.na(!!sym(raw_col)) & is.na(!!sym(clean_col))) %>%
-      select(
-        tb_id, 
-        name, 
-        value = !!sym(raw_col)
-      ) %>%
-      mutate(
+      transmute(
+        tb_id,
+        name,
+        value = as.character(!!sym(raw_col)),  # <<< CHANGE: coerce to character
         field = raw_col,
         error = error_msg
       )
@@ -247,7 +245,7 @@ export_unique_values_template <- function(data, target_cols, output_path,
       # We join based on the context (column + clean_value)
       current_uniques <- current_uniques %>%
         left_join(
-          lookup_data %>% select(-any_of("raw_value")), # Don't duplicate raw_value
+          lookup_data %>% select(-any_of(c("raw_value", "n", "columns_present"))), # Don't duplicate columns
           by = c("original_column", "clean_value")
         )
     }
@@ -283,7 +281,7 @@ export_unique_values_template <- function(data, target_cols, output_path,
         message("-> Pre-filling audit with existing lookup data...")
         current_uniques <- current_uniques %>%
           left_join(
-            lookup_data %>% select(-any_of("raw_value")),
+            lookup_data %>% select(-any_of(c("raw_value", "n", "columns_present"))),
             by = "clean_value"
           )
       } else {
