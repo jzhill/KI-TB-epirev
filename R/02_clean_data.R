@@ -118,7 +118,7 @@ reg_combined <- reg_combined %>%
   # Position next to the numeric age
   relocate(age_group_10yr, age_group_who, age_group_new, .after = age_clean)
 
-# Coded geography island/village from lookup ----------------------------
+# Geography island/village ----------------------------
 
 ## Setup and Reference Data -----------------------------------------------
 
@@ -306,7 +306,7 @@ message("-> Geography classification complete.")
 
 
 
-# Coded disease types and sites from lookup ------------------------
+# PTB/EPTB and disease sites ------------------------
 
 ## Define disease column sets ----------------------------------------------------
 
@@ -428,37 +428,50 @@ message("-> Disease classification complete.")
 
 
 
-# Registration Category from lookup ---------------------------------------
+# Treatment Category ---------------------------------------
 
 ## Define category column sets --------------------------------------------
 
-cat_cols <- c(
-  "cat_new", "cat_relapse", "cat_failure", 
-  "cat_rad", "cat_tf_in", "cat_others",
-  "cat_ltfu_2018", "cat_unknown_2018", "cat_failure_dup"
-)
+cat_cols <- reg_combined_raw %>%
+  select(starts_with("cat_")) %>%
+  colnames()
 
 # These are the clean columns we want in our final register
 cat_template <- c(
-  "registration_category" # The final single-choice factor
+  "cat_factor" # The final single-choice factor
 )
 
 # 1. Define the "Master List" of valid category codes
 valid_cat_codes <- c("new", "relapse", "failure", "ltfu", "tf_in", "other", "unknown", "nr")
 
+## Number of columns with data -------------------------
+
+reg_combined <- reg_combined %>%
+  mutate(
+    cat_n = rowSums(
+      !is.na(select(., any_of(cat_cols))) &
+        select(., any_of(cat_cols)) != "",
+      na.rm = TRUE
+    ),
+    
+    # Replaces 0 counts with NA, so that we can use it for error logging
+    cat_n = if_else(cat_n == 0, NA_integer_, cat_n)
+  )
+
+
 ## Load and prepare the category lookup file -----------------------
 
-cat_lookup_path <- here("data-raw", "unique_registration_category_lookup.csv")
+cat_lookup_path <- here("data-raw", "unique_category_lookup.csv")
 if (!file.exists(cat_lookup_path)) stop("! Category lookup not found.")
 
 cat_lookup <- read_csv(cat_lookup_path, show_col_types = FALSE) %>%
   mutate(
     clean_value = str_squish(str_trim(str_to_lower(raw_value))),
-    registration_category = str_trim(str_to_lower(registration_category))
+    cat_factor = str_squish(str_trim(str_to_lower(cat_factor)))
   ) %>% 
-  mutate(registration_category = if_else(
-    registration_category %in% valid_cat_codes, 
-    registration_category, 
+  mutate(cat_factor = if_else(
+    cat_factor %in% valid_cat_codes, 
+    cat_factor, 
     NA_character_
   ))
 
@@ -467,7 +480,7 @@ cat_lookup <- read_csv(cat_lookup_path, show_col_types = FALSE) %>%
 export_unique_values_template(
   data = reg_combined,
   target_cols = cat_cols,
-  output_path = file.path(current_dir, "unique_registration_category.csv"),
+  output_path = file.path(current_dir, "unique_category.csv"),
   template_cols = cat_template,
   lookup_data = cat_lookup
 )
@@ -488,17 +501,17 @@ cat_long <- reg_combined %>%
 
 cat_classified_wide <- cat_long %>%
   left_join(cat_lookup, by = c("original_column", "clean_value")) %>%
-  filter(!is.na(registration_category)) %>%
+  filter(!is.na(cat_factor)) %>%
   group_by(tb_id) %>%
   summarize(
     
     # How many categories have been matched for the patient
-    cat_count = n_distinct(registration_category),
+    cat_n_mapped = n_distinct(cat_factor),
     
     # Only give a category if one matches
-    registration_category = case_when(
-      cat_count == 1 ~ first(registration_category),
-      cat_count  > 1 ~ NA_character_, # Conflict!
+    cat_factor = case_when(
+      cat_n_mapped == 1 ~ first(cat_factor),
+      cat_n_mapped  > 1 ~ NA_character_, # Conflict!
       TRUE           ~ NA_character_
     ),
     .groups = "drop"
@@ -507,26 +520,26 @@ cat_classified_wide <- cat_long %>%
 ## Join results back to main register -------------------------------------
 
 reg_combined <- reg_combined %>%
-  select(-any_of("registration_category")) %>% 
+  select(-any_of("cat_factor")) %>% 
   left_join(cat_classified_wide, by = "tb_id") %>%
   
   # Convert to Factor with Proper Labels
-  mutate(registration_category = factor(
-    registration_category, 
+  mutate(cat_factor = factor(
+    cat_factor, 
     levels = c("new", "relapse", "failure", "ltfu", "tf_in", "other", "unknown", "nr"),
     labels = c("New", "Relapse", "Treatment after failure", "Treatment after LTFU", 
                "Transfer in", "Other", "Unknown", "Not recorded")
   )) %>%
   
   # Organize
-  select(-any_of("cat_count")) %>%
-  relocate(cat_ltfu_2018, cat_unknown_2018, cat_failure_dup, registration_category, .after = cat_others)
+  select(-any_of("cat_n_mapped")) %>%
+  relocate(any_of(cat_cols), cat_factor, .after = site_ento)
 
 message("-> Registration category classification complete.")
 
 
 
-# Bacteriology columns (smear / xpert / culture) audit and classification ------------------
+# Bacteriology ------------------
 
 ## Audit unique values ------------------------
 
@@ -693,11 +706,187 @@ reg_combined <- reg_combined %>%
     bac_all_blob, bac_all_cat,
     bc_reg_bin, bc_dx_bin, bc_all_bin,
     bc_dx_comp_bin, bc_all_comp_bin,
-    .after = registration_category
+    .after = cat_factor
     )
 
 
 message("-> 2017 BC/CD cleaning and comparison complete.")
+
+
+
+
+# Treatment outcomes -----------------
+
+# Identify outcome columns
+outcome_cols <- reg_combined_raw %>%
+  select(starts_with("outcome_")) %>%
+  colnames()
+
+# Define valid outcome codes
+valid_outcome_codes <- c("cured", "completed", "failure", "died", "ltfu", "tf_out", "ne", "sld")
+
+
+## Load and prepare the outcome lookup file -----------------------
+
+outcome_lookup_path <- here("data-raw", "unique_outcome_lookup.csv")
+if (!file.exists(outcome_lookup_path)) stop("! Outcome lookup not found.")
+
+outcome_lookup <- read_csv(outcome_lookup_path, show_col_types = FALSE) %>%
+  mutate(
+    outcome_factor_manual = str_squish(str_trim(str_to_lower(outcome_factor_manual))),
+    outcome_factor_manual = if_else(outcome_factor_manual %in% valid_outcome_codes, outcome_factor_manual, NA_character_)
+  )
+
+## Counts and keys from multiple columns ---------------------------
+
+# Counts
+reg_combined <- reg_combined %>%
+  mutate(
+    outcome_n = rowSums(
+      !is.na(select(., any_of(outcome_cols))) &
+        select(., any_of(outcome_cols)) != "",
+      na.rm = TRUE
+    ),
+    outcome_n = if_else(outcome_n == 0, NA_integer_, outcome_n)
+  )
+
+# Build per-patient keyed string: "outcome_x: <value> | outcome_y: <value>"
+outcome_key_df <- reg_combined %>%
+  select(tb_id, any_of(outcome_cols)) %>%
+  pivot_longer(
+    cols = any_of(outcome_cols),
+    names_to = "outcome_col",
+    values_to = "outcome_val",
+    values_drop_na = TRUE
+  ) %>%
+  mutate(
+    outcome_val = str_squish(str_trim(str_to_lower(outcome_val))),
+    outcome_val = if_else(outcome_val == "", NA_character_, outcome_val),
+    outcome_part = paste0(outcome_col, ": ", outcome_val)
+  ) %>%
+  filter(!is.na(outcome_val)) %>%
+  group_by(tb_id) %>%
+  summarise(
+    outcome_key = paste(sort(unique(outcome_part)), collapse = " | "),
+    .groups = "drop"
+  )
+
+# Join back to register
+reg_combined <- reg_combined %>%
+  select(-any_of("outcome_key")) %>%
+  left_join(outcome_key_df, by = "tb_id")
+
+
+## Assign outcome from correctly filled column ----------------------
+
+# ONLY when outcome_n == 1 and cell parses as a date
+
+reg_combined <- reg_combined %>%
+  mutate(
+    outcome_date = if_else(
+      outcome_n == 1,
+      apply(select(., any_of(outcome_cols)), 1, function(row) {
+        x <- row[!is.na(row) & row != ""]
+        if (length(x) == 1) as.character(x) else NA_character_
+      }),
+      NA_character_
+    ),
+    outcome_factor = if_else(
+      outcome_n == 1,
+      apply(select(., any_of(outcome_cols)), 1, function(row) {
+        nm <- outcome_cols[!is.na(row) & row != ""]
+        if (length(nm) == 1) str_remove(nm, "^outcome_") else NA_character_
+      }),
+      NA_character_
+    ),
+    outcome_factor = case_when(
+      outcome_factor == "cured" ~ "cured",
+      outcome_factor == "complete" ~ "completed",
+      outcome_factor == "failure" ~ "failed",
+      outcome_factor == "died" ~ "died",
+      outcome_factor == "ltfu" ~ "ltfu",
+      outcome_factor == "tf_out" ~ "tf_out",
+      outcome_factor == "not_evaluated_2017" ~ "ne",
+      outcome_factor == "sld_2018" ~ "sld",
+      TRUE ~ NA_character_
+    ),
+    outcome_date = parse_mixed_date(outcome_date),
+    
+    # Only keep the auto-assignment if date parsed successfully
+    outcome_factor = if_else(outcome_n == 1 & !is.na(outcome_date), outcome_factor, NA_character_)
+  )
+
+## Unique keys that didn't parse to lookup ----------------
+
+# - multiple outcomes recorded OR
+# - single outcome but raw is not parseable as a date
+
+outcome_manual_df <- reg_combined %>%
+  filter(
+    outcome_n > 1 |
+      (outcome_n == 1 & !is.na(outcome_key) & is.na(outcome_date))
+  )
+
+export_unique_values_template(
+  data = outcome_manual_df,
+  target_cols = c("outcome_key"),
+  output_path = file.path(current_dir, "unique_outcome.csv"),
+  template_cols = c("outcome_factor_manual", "outcome_date_manual"),
+  lookup_data = outcome_lookup,
+  counts = TRUE,
+  unique_scope = "global"
+)
+
+message("-> Outcome manual audit exported for rows with outcome_n > 1 or unparsed single-outcome text.")
+
+## Join from lookup and tidy up --------------------
+
+reg_combined <- reg_combined %>%
+  select(-any_of(c("outcome_factor_manual", "outcome_date_manual"))) %>%  # idempotent
+  left_join(
+    outcome_lookup %>%
+      select(
+        clean_value,
+        outcome_factor_manual,
+        outcome_date_manual
+      ),
+    by = c("outcome_key" = "clean_value")
+  ) %>% 
+  mutate(
+    outcome_factor = case_when(
+      !is.na(outcome_factor_manual) ~ outcome_factor_manual,
+      !is.na(outcome_factor)        ~ outcome_factor,
+      TRUE                          ~ NA_character_
+    ),
+    outcome_date = case_when(
+      !is.na(outcome_date_manual)      ~ parse_mixed_date(outcome_date_manual),
+      !is.na(outcome_date)             ~ outcome_date,
+      TRUE                             ~ NA_Date_
+    )
+  ) %>%
+  mutate(
+    # Ensure Date type (idempotent)
+    outcome_date = as.Date(outcome_date),
+    
+    # Outcome factor with labels
+    outcome_factor = factor(
+      outcome_factor,
+      levels = c("cured", "completed", "failed", "died", "ltfu", "tf_out", "ne", "sld"),
+      labels = c(
+        "Cured",
+        "Treatment completed",
+        "Treatment failed",
+        "Died",
+        "Lost to follow-up",
+        "Transferred out",
+        "Not evaluated",
+        "Second-line drugs"
+      )
+    )
+  ) %>%
+  select(-any_of(c("outcome_factor_manual", "outcome_date_manual"))) %>% 
+  relocate(any_of(outcome_cols), outcome_n, outcome_key, outcome_factor, outcome_date, .after = bc_all_comp_bin)
+
 
 
 
@@ -723,7 +912,10 @@ cleaning_map <- tribble(
   # Disease Classification Audits
   "disease_site",           "ptb_eptb",         "Disease string missing from lookup (Site)",
   "disease_site_pulm_2018", "ptb_eptb",         "Disease string missing from lookup (Pulm 2018)",
-  "disease_site_ep_2018",   "ptb_eptb",         "Disease string missing from lookup (EP 2018)"
+  "disease_site_ep_2018",   "ptb_eptb",         "Disease string missing from lookup (EP 2018)",
+  
+  "cat_n",                  "cat_factor",       "Treatment category not assigned from lookup",
+  "outcome_key",            "outcome_factor",   "Outcome category not assigned from columns"
 )
 
 # Generate the log in one command
