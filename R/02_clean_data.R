@@ -34,6 +34,9 @@ if (!file.exists(raw_path)) stop("Raw file not found in: ", current_dir)
 
 reg_combined_raw <- qread(raw_path)
 
+raw_cols <- reg_combined_raw %>% colnames()
+
+
 # ID and demographics ------------------
 
 ## Initial cleaning and tb_id -----------------------
@@ -112,6 +115,11 @@ demo_cols <- c(
   "tb_id", "tb_no", "tb_no_clean", "reg_year", "month_ref",
   "date_registered", "date_reg_clean", "date_started", "date_start_clean",
   "name", "age", "age_clean", "age_group_10yr", "age_group_who", "age_group_new", "sex", "sex_clean"
+)
+
+demo_cols_clean <- c(
+  "tb_id", "reg_year", "date_reg_clean", "date_start_clean", "name",
+  "age_clean", "age_group_10yr", "age_group_who", "age_group_new", "sex_clean"
 )
 
 
@@ -295,6 +303,13 @@ geo_cols <- c(
   "ST_village", "NT_village", "island_ST_bin", "island_NT_bin"
   )
 
+geo_cols_clean <- c(
+  "has_any_geo_data", "ST_OI", "division", "division_code", "island", "island_code",  
+  "ST_village", "NT_village", "island_ST_bin", "island_NT_bin"
+)
+
+
+
 
 message("-> Geography classification complete.")
 
@@ -419,6 +434,11 @@ reg_combined <- reg_combined %>%
 
 disease_cols <- c(disease_cols_raw, "has_any_disease_data", disease_template)
 
+disease_cols_clean <- c("has_any_disease_data", disease_template)
+
+
+
+
 message("-> Disease classification complete.")
 
 
@@ -531,6 +551,10 @@ reg_combined <- reg_combined %>%
 
 
 cat_cols <- c(cat_cols_raw, "cat_n", "cat_factor")
+
+cat_cols_clean <- c("cat_n", "cat_factor")
+
+
 
 message("-> Registration category classification complete.")
 
@@ -698,6 +722,12 @@ bac_cols <- c(
   "bac_dx_blob", "bac_dx_cat", "bac_eot_blob", "bac_eot_cat", "bac_all_blob", "bac_all_cat",
   "bc_reg_bin", "bc_dx_bin", "bc_all_bin", "bc_dx_comp_bin", "bc_all_comp_bin")
 
+bac_cols_clean <- c(
+  "bc_cd_reg", "bac_dx_cat", "bac_eot_cat", "bac_all_cat",
+  "bc_reg_bin", "bc_dx_bin", "bc_all_bin", "bc_dx_comp_bin", "bc_all_comp_bin")
+
+
+
 
 message("-> 2017 BC/CD cleaning and comparison complete.")
 
@@ -761,6 +791,9 @@ reg_combined <- reg_combined %>%
 
 
 regimen_cols <- c("regimen", "regimen_clean", regimen_template)
+
+regimen_cols_clean <- regimen_template
+
 
 
 
@@ -938,9 +971,14 @@ reg_combined <- reg_combined %>%
 
 outcome_cols <- c(outcome_cols_raw, "outcome_n", "outcome_key", "outcome_factor", "outcome_date")
 
+outcome_cols_clean <- c("outcome_n", "outcome_factor", "outcome_date")
+
+
 
 
 # Organise columns ---------------------------
+
+
 
 final_order <- c(
   demo_cols,
@@ -959,10 +997,20 @@ reg_combined <- reg_combined %>%
 ungrouped_cols <- setdiff(names(reg_combined), final_order)
 ungrouped_cols
 
+# Create clean register dataframe --------------------
 
+reg_clean_cols <- c(
+  demo_cols_clean,
+  geo_cols_clean,
+  disease_cols_clean,
+  regimen_cols_clean,
+  cat_cols_clean,
+  bac_cols_clean,
+  outcome_cols_clean
+)
 
-
-
+reg_clean <- reg_combined %>% 
+  select(any_of(reg_clean_cols))
 
 
 # Batch Error Logging ------------------------------------
@@ -988,7 +1036,8 @@ cleaning_map <- tribble(
   
   "cat_n",                  "cat_factor",       "Treatment category not assigned from lookup",
   "outcome_key",            "outcome_factor",   "Outcome category not assigned from columns",
-  "outcome_key",            "outcome_date",     "Outcome date not assigned from columns"
+  "outcome_key",            "outcome_date",     "Outcome date not assigned from columns",
+  "regimen",                "regimen_factor",   "Regimen not assigned from lookup"
 )
 
 # Generate the log in one command
@@ -1003,8 +1052,8 @@ if (nrow(data_error_log) > 0) {
 }
 
 # Output Clean Combined Register Data
-qsave(reg_combined, file.path(current_dir, "register_combined_clean.qs"))
-write_csv(reg_combined, file.path(current_dir, "register_combined_clean.csv"))
+qsave(reg_clean, file.path(current_dir, "register_combined_clean.qs"))
+write_csv(reg_clean, file.path(current_dir, "register_combined_clean.csv"))
 
 message("Cleaning complete for: ", current_ref)
 
