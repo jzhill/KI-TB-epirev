@@ -57,5 +57,8 @@ data-processed/*
 # figures are generated and saved locally
 figures/*
 
+# outputs are generated and saved locally
+outputs/*
+
 # reports are generated and saved locally
 reports/*
