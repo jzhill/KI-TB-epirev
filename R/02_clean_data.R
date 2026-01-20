@@ -46,6 +46,9 @@ reg_combined <- reg_combined_raw %>%
   # Remove monthly divider rows and any other empty/invalid rows
   filter(!is.na(name), !is.na(tb_no)) %>%
   
+  # Ensure reg_year is numeric/integer for downstream joins/plots
+  mutate(reg_year = suppressWarnings(as.integer(reg_year))) %>%
+  
   # Create unique TB reg number
   mutate(
     tb_no_clean = format_tb_number(tb_no),
@@ -131,14 +134,7 @@ demo_cols_clean <- c(
 
 # File Paths
 geo_lookup_path <- here("data-raw", "unique_geo_lookup.csv")
-geo_helper_path <- here("data-raw", "geo_helper.xlsx")
-
 if (!file.exists(geo_lookup_path)) stop("! Geo lookup (csv) not found.")
-if (!file.exists(geo_helper_path)) stop("! Geo helper (xlsx) not found.")
-
-# Load Census Reference
-census_codes <- read_excel(geo_helper_path, sheet = "census_codes") %>%
-  mutate(across(everything(), ~str_trim(str_to_lower(as.character(.)))))
 
 # Load geo lookup table
 geo_lookup <- read_csv(geo_lookup_path, show_col_types = FALSE) %>%
@@ -146,37 +142,8 @@ geo_lookup <- read_csv(geo_lookup_path, show_col_types = FALSE) %>%
 
 # Define Official Lists for Template
 # Sorted by census code to preserve geographic/official order
-island_names <- census_codes %>% 
-  arrange(as.numeric(island_code)) %>% 
-  pull(island_name) %>% 
-  unique()
 
-island_codes <- census_codes %>% 
-  arrange(as.numeric(island_code)) %>% 
-  pull(island_code) %>% 
-  unique()
-
-division_names <- census_codes %>% 
-  arrange(as.numeric(division_code)) %>% 
-  pull(division_name) %>% 
-  unique()
-
-division_codes <- census_codes %>% 
-  arrange(as.numeric(division_code)) %>% 
-  pull(division_code) %>% 
-  unique()
-
-st_village_names <- census_codes %>% 
-  filter(island_name == "south tarawa") %>% 
-  arrange(as.numeric(village_code)) %>% # Assuming you have village_code
-  pull(village_name) %>% 
-  unique()
-
-nt_village_names <- census_codes %>% 
-  filter(island_name == "north tarawa") %>% 
-  arrange(as.numeric(village_code)) %>% 
-  pull(village_name) %>% 
-  unique()
+geo_meta <- get_official_geo_metadata(here("data-raw", "geo_helper.xlsx"))
 
 # Define column sets
 # ORDER MATTERS: The first column is the highest priority for resolution
@@ -188,9 +155,9 @@ geo_template <- c(
   "island", "island_search", "island_manual", 
   "ST_village", "ST_village_search", "ST_village_manual", 
   "NT_village", "NT_village_search", "NT_village_manual",
-  paste0("is_", island_names),
-  paste0("st_v_", st_village_names),
-  paste0("nt_v_", nt_village_names)
+  paste0("is_", geo_meta$island_names),
+  paste0("st_v_", geo_meta$st_village_names),
+  paste0("nt_v_", geo_meta$nt_village_names)
 )
 
 
@@ -252,7 +219,7 @@ reg_combined <- reg_combined %>%
   
   # Attach Official Census Codes and Divisions
   left_join(
-    census_codes %>%
+    geo_meta$census_codes %>%
       select(island_name, island_code, division = division_name, division_code) %>%
       distinct(), 
     by = c("island" = "island_name")
@@ -270,8 +237,8 @@ reg_combined <- reg_combined %>%
     # island_NT_bin: TRUE only for North Tarawa
     island_NT_bin = !is.na(island) & island == "north tarawa",
     
-    # ST_OI: "ST" (South Tarawa), "OI" (Outer Islands), or "NR" (Not Recorded)
-    ST_OI = case_when(
+    # OI_ST: "ST" (South Tarawa), "OI" (Outer Islands), or "NR" (Not Recorded)
+    OI_ST = case_when(
       island == "south tarawa" ~ "ST",
       island == "nr"           ~ "NR",
       !is.na(island)           ~ "OI", # All other matched islands are Outer Islands
@@ -281,30 +248,40 @@ reg_combined <- reg_combined %>%
   
   # Ensure geo codes are factors using the census code ordering
   mutate(
-    # 1. Divisions
-    division = factor(division, levels = c(division_names, "nr")),
-    division_code = factor(division_code, levels = c(division_codes, "nr")),
+    division = factor(division, 
+                      levels = c(geo_meta$division_names, "nr"),
+                      # Deal with Line And Pheonix
+                      labels = c(str_to_title(geo_meta$division_names) %>% str_replace(" And ", " and "), "Not Recorded")),
     
-    # 2. Islands (Ordered North to South based on census codes)
-    island = factor(island, levels = c(island_names, "nr")),
-    island_code   = factor(island_code, levels = c(island_codes, "nr")),
+    division_code = factor(division_code, levels = c(geo_meta$division_codes, "nr")),
     
-    # 3. Villages
-    ST_village = factor(ST_village, levels = c(st_village_names, "nr")),
-    NT_village = factor(NT_village, levels = c(nt_village_names, "nr")),
+    island = factor(island, 
+                    levels = c(geo_meta$island_names, "nr"),
+                    labels = c(str_to_title(geo_meta$island_names), "Not Recorded")),
     
-    # 4. ST_OI Grouping
-    ST_OI = factor(ST_OI, levels = c("ST", "OI", "NR"))
+    island_code = factor(island_code, levels = c(geo_meta$island_codes, "nr")),
+    
+    ST_village = factor(ST_village, 
+                        levels = c(geo_meta$st_village_names, "nr"),
+                        labels = c(str_to_title(geo_meta$st_village_names), "Not Recorded")),
+    
+    NT_village = factor(NT_village, 
+                        levels = c(geo_meta$nt_village_names, "nr"),
+                        labels = c(str_to_title(geo_meta$nt_village_names), "Not Recorded")),
+    
+    OI_ST = factor(OI_ST, 
+                   levels = c("ST", "OI", "NR"),
+                   labels = c("South Tarawa", "Outer Islands", "Not Recorded"))
   )
 
 geo_cols <- c(
   "address", "treatment_unit", "card_location_2018", "address_desc_2024", "school_2024",
-  "has_any_geo_data", "ST_OI", "division", "division_code", "island", "island_code",  
+  "has_any_geo_data", "OI_ST", "division", "division_code", "island", "island_code",  
   "ST_village", "NT_village", "island_ST_bin", "island_NT_bin"
   )
 
 geo_cols_clean <- c(
-  "has_any_geo_data", "ST_OI", "division", "division_code", "island", "island_code",  
+  "has_any_geo_data", "OI_ST", "division", "division_code", "island", "island_code",  
   "ST_village", "NT_village", "island_ST_bin", "island_NT_bin"
 )
 
@@ -462,6 +439,17 @@ valid_cat_codes <- c("new", "relapse", "failure", "ltfu", "tf_in", "other", "unk
 ## Number of columns with data -------------------------
 
 reg_combined <- reg_combined %>%
+  
+  # Binary flag showing if there is any category data across the columns
+  mutate(
+    has_any_cat_data = if_else(
+      if_any(any_of(cat_cols_raw), ~ !is.na(.x) & .x != ""),
+      TRUE,
+      NA
+    )
+  ) %>% 
+  
+  # How many category columns have data
   mutate(
     cat_n = rowSums(
       !is.na(select(., any_of(cat_cols_raw))) &
@@ -550,9 +538,9 @@ reg_combined <- reg_combined %>%
   select(-any_of("cat_n_mapped")) 
 
 
-cat_cols <- c(cat_cols_raw, "cat_n", "cat_factor")
+cat_cols <- c(cat_cols_raw, "has_any_cat_data", "cat_n", "cat_factor")
 
-cat_cols_clean <- c("cat_n", "cat_factor")
+cat_cols_clean <- c("has_any_cat_data", "cat_n", "cat_factor")
 
 
 
@@ -672,7 +660,11 @@ reg_combined <- reg_combined %>%
     bac_eot_cat = vapply(bac_eot_blob, classify_bac_blob, character(1)),
     bac_all_cat = vapply(bac_all_blob, classify_bac_blob, character(1))
   ) %>%
-  
+  mutate(
+    bac_dx_cat  = factor(bac_dx_cat,  levels = c("pos", "neg", "nr")),
+    bac_eot_cat = factor(bac_eot_cat, levels = c("pos", "neg", "nr")),
+    bac_all_cat = factor(bac_all_cat, levels = c("pos", "neg", "nr"))
+  ) %>% 
   
   mutate(
     bc_reg_clean = str_squish(str_trim(str_to_lower(disease_site_bc_2017))),
@@ -708,8 +700,8 @@ reg_combined <- reg_combined %>%
     ),
     
     # Derived from blobs (binary BC flags)
-    bc_dx_bin  = (bac_dx_cat  == "pos"),
-    bc_all_bin = (bac_all_cat == "pos"),
+    bc_dx_bin  = coalesce(bac_dx_cat  == "pos", FALSE),
+    bc_all_bin = coalesce(bac_all_cat == "pos", FALSE),
     
     # Composite rules (BC if any evidence)
     bc_dx_comp_bin  = bc_dx_bin  | bc_reg_bin,
@@ -730,6 +722,101 @@ bac_cols_clean <- c(
 
 
 message("-> 2017 BC/CD cleaning and comparison complete.")
+
+
+# DRTB -------------------
+
+## Classify based on raw column -------------------
+
+reg_combined <- reg_combined %>%
+  mutate(
+    drtb_raw = str_squish(str_trim(str_to_lower(drtb_status_2018))),
+    drtb_raw = na_if(drtb_raw, ""),
+    
+    # Strip trailing dates like "15/7/19" or "15-07-2019"
+    drtb_raw = str_replace(
+      drtb_raw,
+      "\\s+\\d{1,2}[/\\-]\\d{1,2}[/\\-]\\d{2,4}$",
+      ""
+    ),
+    
+    # Classify
+    drtb_factor = case_when(
+      
+      # Explicit DS-TB / no resistance
+      drtb_raw %in% c("n", "no", "none", "nil", "neg", "negative", "dstb", "ds-tb", "ds") ~ "dstb",
+      
+      # Explicit unknown / unclear
+      drtb_raw %in% c("u", "unknown", "nr", "not recorded") ~ "nr",
+      
+      # Any RR / MDR / XDR signal
+      str_detect(
+        drtb_raw,
+        "\\b(rr|mdr|xdr)\\b|rr\\s*/\\s*mdr|rr\\s+mdr"
+      ) ~ "drtb",
+      
+      # Catch common shorthand variants
+      drtb_raw %in% c("(r/r)", "r/r") ~ "drtb",
+      
+      # Anything else mark as NA
+      TRUE ~ NA_character_
+    ),
+    
+    # Stable factor
+    drtb_factor = factor(
+      drtb_factor,
+      levels = c("dstb", "drtb", "nr")
+    )
+  )
+
+
+
+## Search across raw columns and combine ----------------
+
+# Regex: aims to catch RR/MDR-style signals while avoiding "Dr / Dr."
+drtb_pattern <- paste(
+  c(
+    "\\bdrtb\\b",
+    "\\bdrug\\s*resistan\\w*\\b",           # drug resistant / resistance / resistant
+    "\\bmdr\\b", "\\bmdr\\s*tb\\b", "\\bmdr[-\\s]?tb\\b",
+    "\\bxdr\\b", "\\bxdr[-\\s]?tb\\b",
+    "\\brr\\b", "\\brr\\s*tb\\b", "\\brr[-\\s]?tb\\b",
+    "\\brr\\s*/\\s*mdr\\b", "\\brr\\s+mdr\\b",
+    "\\brif\\s*resistan\\w*\\b",            # rif resistant / resistance
+    "\\brif\\s*resist\\b",                  # common shorthand
+    "\\brifampicin\\s*resistan\\w*\\b"
+  ),
+  collapse = "|"
+)
+
+reg_combined <- reg_combined %>%
+  tidyr::unite(
+    col = "drtb_search_blob",
+    dplyr::any_of(raw_cols),
+    sep = " | ",
+    na.rm = TRUE,
+    remove = FALSE
+  ) %>%
+  mutate(
+    drtb_search_blob = str_squish(str_trim(str_to_lower(drtb_search_blob))),
+    drtb_search_blob = na_if(drtb_search_blob, ""),
+    
+    # binary flag
+    drtb_search_bin = if_else(
+      !is.na(drtb_search_blob) & str_detect(drtb_search_blob, drtb_pattern),
+      TRUE,
+      FALSE,
+      missing = FALSE
+    )
+  ) %>%
+  mutate(
+    drtb_comp_bin = (drtb_factor == "drtb") | drtb_search_bin
+  )
+
+drtb_cols <- c("drtb_status_2018", "drtb_factor", "drtb_search_bin", "drtb_comp_bin")
+
+drtb_cols_clean <- c("drtb_factor", "drtb_comp_bin")
+
 
 
 
@@ -807,6 +894,16 @@ outcome_cols_raw <- reg_combined_raw %>%
 # Define valid outcome codes
 valid_outcome_codes <- c("cured", "completed", "failed", "died", "ltfu", "tf_out", "ne", "sld")
 
+# Flag: any outcome data present 
+reg_combined <- reg_combined %>%
+  mutate(
+    has_any_outcome_data = if_else(
+      if_any(any_of(outcome_cols_raw), ~ !is.na(.x) & .x != ""),
+      TRUE,
+      NA
+    )
+  )
+
 
 ## Load and prepare the outcome lookup file -----------------------
 
@@ -819,21 +916,9 @@ outcome_lookup <- read_csv(outcome_lookup_path, show_col_types = FALSE) %>%
     outcome_factor_manual = if_else(outcome_factor_manual %in% valid_outcome_codes, outcome_factor_manual, NA_character_)
   )
 
-## Counts and keys from multiple columns ---------------------------
+## Pivot outcomes long --------------------------------------------
 
-# Counts
-reg_combined <- reg_combined %>%
-  mutate(
-    outcome_n = rowSums(
-      !is.na(select(., any_of(outcome_cols_raw))) &
-        select(., any_of(outcome_cols_raw)) != "",
-      na.rm = TRUE
-    ),
-    outcome_n = if_else(outcome_n == 0, NA_integer_, outcome_n)
-  )
-
-# Build per-patient keyed string: "outcome_x: <value> | outcome_y: <value>"
-outcome_key_df <- reg_combined %>%
+outcome_long <- reg_combined %>%
   select(tb_id, any_of(outcome_cols_raw)) %>%
   pivot_longer(
     cols = any_of(outcome_cols_raw),
@@ -842,61 +927,75 @@ outcome_key_df <- reg_combined %>%
     values_drop_na = TRUE
   ) %>%
   mutate(
-    outcome_val = str_squish(str_trim(str_to_lower(outcome_val))),
-    outcome_val = if_else(outcome_val == "", NA_character_, outcome_val),
+    outcome_val = str_squish(str_trim(str_to_lower(as.character(outcome_val)))),
+    outcome_val = na_if(outcome_val, ""),
+    
+    # outcome code from column name (raw)
+    outcome_code_raw = str_remove(outcome_col, "^outcome_"),
+    
+    # harmonise codes to your valid set
+    outcome_factor_from_col = case_when(
+      outcome_code_raw == "cured"              ~ "cured",
+      outcome_code_raw == "complete"           ~ "completed",
+      outcome_code_raw == "failure"            ~ "failed",
+      outcome_code_raw == "died"               ~ "died",
+      outcome_code_raw == "ltfu"               ~ "ltfu",
+      outcome_code_raw == "tf_out"             ~ "tf_out",
+      outcome_code_raw == "not_evaluated_2017" ~ "ne",
+      outcome_code_raw == "sld_2018"           ~ "sld",
+      TRUE                                     ~ NA_character_
+    ),
+    
+    # attempt to parse the cell content as a date
+    outcome_date_parsed = parse_mixed_date(outcome_val),
+    
+    # for audit key construction
     outcome_part = paste0(outcome_col, ": ", outcome_val)
   ) %>%
-  filter(!is.na(outcome_val)) %>%
+  filter(!is.na(outcome_val))  # keep only non-blank values
+
+
+## Build per-patient key for manual audit ------------------------------
+
+outcome_key_df <- outcome_long %>%
   group_by(tb_id) %>%
   summarise(
     outcome_key = paste(sort(unique(outcome_part)), collapse = " | "),
     .groups = "drop"
   )
 
-# Join back to register
 reg_combined <- reg_combined %>%
   select(-any_of("outcome_key")) %>%
   left_join(outcome_key_df, by = "tb_id")
 
 
-## Assign outcome from correctly filled column ----------------------
+## Auto-assign ONLY when: outcome_n == 1 AND date parses ----------------
+## (and the column name implies the outcome type)
 
-# ONLY when outcome_n == 1 and cell parses as a date
+outcome_auto_df <- outcome_long %>%
+  group_by(tb_id) %>%
+  summarise(
+    outcome_n = n(),  # number of non-blank outcome cells across outcome_* cols
+    
+    outcome_factor = if_else(
+      outcome_n == 1 & !is.na(first(outcome_date_parsed)),
+      first(outcome_factor_from_col),
+      NA_character_
+    ),
+    
+    outcome_date = if_else(
+      outcome_n == 1 & !is.na(first(outcome_date_parsed)),
+      as.Date(first(outcome_date_parsed)),
+      as.Date(NA)
+    ),
+    .groups = "drop"
+  )
 
 reg_combined <- reg_combined %>%
-  mutate(
-    outcome_date = if_else(
-      outcome_n == 1,
-      apply(select(., any_of(outcome_cols_raw)), 1, function(row) {
-        x <- row[!is.na(row) & row != ""]
-        if (length(x) == 1) as.character(x) else NA_character_
-      }),
-      NA_character_
-    ),
-    outcome_factor = if_else(
-      outcome_n == 1,
-      apply(select(., any_of(outcome_cols_raw)), 1, function(row) {
-        nm <- outcome_cols_raw[!is.na(row) & row != ""]
-        if (length(nm) == 1) str_remove(nm, "^outcome_") else NA_character_
-      }),
-      NA_character_
-    ),
-    outcome_factor = case_when(
-      outcome_factor == "cured" ~ "cured",
-      outcome_factor == "complete" ~ "completed",
-      outcome_factor == "failure" ~ "failed",
-      outcome_factor == "died" ~ "died",
-      outcome_factor == "ltfu" ~ "ltfu",
-      outcome_factor == "tf_out" ~ "tf_out",
-      outcome_factor == "not_evaluated_2017" ~ "ne",
-      outcome_factor == "sld_2018" ~ "sld",
-      TRUE ~ NA_character_
-    ),
-    outcome_date = parse_mixed_date(outcome_date),
-    
-    # Only keep the auto-assignment if date parsed successfully
-    outcome_factor = if_else(outcome_n == 1 & !is.na(outcome_date), outcome_factor, NA_character_)
-  )
+  select(-any_of(c("outcome_n", "outcome_factor", "outcome_date"))) %>%  # idempotent
+  left_join(outcome_auto_df, by = "tb_id")
+
+
 
 ## Unique keys that didn't parse to lookup ----------------
 
@@ -969,9 +1068,9 @@ reg_combined <- reg_combined %>%
   select(-any_of(c("outcome_factor_manual", "outcome_date_manual"))) 
 
 
-outcome_cols <- c(outcome_cols_raw, "outcome_n", "outcome_key", "outcome_factor", "outcome_date")
+outcome_cols <- c(outcome_cols_raw, "has_any_outcome_data", "outcome_n", "outcome_key", "outcome_factor", "outcome_date")
 
-outcome_cols_clean <- c("outcome_n", "outcome_factor", "outcome_date")
+outcome_cols_clean <- c("has_any_outcome_data", "outcome_n", "outcome_factor", "outcome_date")
 
 
 
@@ -987,6 +1086,7 @@ final_order <- c(
   regimen_cols,
   cat_cols,
   bac_cols,
+  drtb_cols,
   outcome_cols
 )
 
@@ -1006,6 +1106,7 @@ reg_clean_cols <- c(
   regimen_cols_clean,
   cat_cols_clean,
   bac_cols_clean,
+  drtb_cols_clean,
   outcome_cols_clean
 )
 
@@ -1037,7 +1138,8 @@ cleaning_map <- tribble(
   "cat_n",                  "cat_factor",       "Treatment category not assigned from lookup",
   "outcome_key",            "outcome_factor",   "Outcome category not assigned from columns",
   "outcome_key",            "outcome_date",     "Outcome date not assigned from columns",
-  "regimen",                "regimen_factor",   "Regimen not assigned from lookup"
+  "regimen",                "regimen_factor",   "Regimen not assigned from lookup",
+  "drtb_status_2018",       "drtb_factor",      "DRTB status not assigned from column"
 )
 
 # Generate the log in one command
