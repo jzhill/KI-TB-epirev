@@ -1,80 +1,85 @@
 # Title and Description --------------------------------------------
 # Console runner for KI TB epi analysis outputs
-# Purpose: run output functions interactively (no Quarto)
+# Purpose: Generate and save a full catalog of plots/tables
 # Author: Jeremy Hill
-# Last modified: 2026-01-19
+# Last modified: 2026-01-20
 
 # Packages --------------------------------------------------------
 library(here)
 library(tidyverse)
 library(qs)
+library(flextable)
 
-# Source output functions -----------------------------------------
+# Setup Environment --------------------------------------------
+
+source(here("R", "functions_all.R"))
 source(here("R", "03_output_functions.R"))
 
-# Load clean register ---------------------------------------------
+# Directory logic: Create a dated catalog folder
+
 ref_file <- here("data-processed", "current_register_reference.txt")
-if (!file.exists(ref_file)) stop("Reference file missing. Run Script 01/02 first.")
+if (!file.exists(ref_file)) stop("Reference file missing. Run Script 01 first.")
 
 current_ref <- readLines(ref_file, n = 1)
 current_dir <- here("data-processed", current_ref)
+outputs_dir <- here("outputs", current_ref)
+if (!dir.exists(outputs_dir)) dir.create(outputs_dir, recursive = TRUE)
 
-clean_path <- file.path(current_dir, "register_combined_clean.qs")
-if (!file.exists(clean_path)) stop("Clean register not found at: ", clean_path)
 
-reg_clean <- qread(clean_path)
 
-message("Loaded reg_clean: ", nrow(reg_clean), " rows, ", ncol(reg_clean), " cols")
-message("reg_year range: ", paste(range(as.integer(reg_clean$reg_year), na.rm = TRUE), collapse = "–"))
-
-# Load/build annual population denominators ------------------------
+# Load Data
+reg_clean <- qread(file.path(ref_dir, "register_combined_clean.qs"))
 annual_pop_island_est <- get_annual_pop_island_est()
 
-message("Loaded annual_pop_island_est: ", nrow(annual_pop_island_est), " rows")
-message("year range: ", paste(range(as.integer(annual_pop_island_est$year), na.rm = TRUE), collapse = "–"))
+year_min <- min(reg_clean$reg_year, na.rm = TRUE)
+year_max <- max(reg_clean$reg_year, na.rm = TRUE)
 
+message(">>> Starting Catalog Generation for ", current_ref)
 
-# Demographic and disease table -----------------
+# Demographics Table -------------------------------------------
+message("-> Building Demographics Table...")
+out_demo <- build_demo_table_stoi(reg_clean, year_min, year_max)
 
-# Build table (1998–2024, include NR in All)
-demo_table_stoi <- build_demo_table_stoi(
-  reg_clean = reg_clean,
-  year_min  = 1998,
-  year_max  = 2024
-)
+# Create a 'print-ready' version with a solid background for the PNG
+ft_for_png <- out_demo$ft %>% 
+  bg(bg = "white", part = "all")
 
-# Inspect in console
-print(demo_table_stoi, n = Inf)
+save_as_docx(out_demo$ft, path = file.path(outputs_dir, "table_demographics.docx"))
+save_as_image(ft_for_png, path = file.path(outputs_dir, "table_demographics.png"))
 
-# Optional: view nicely in RStudio Viewer
-if (requireNamespace("flextable", quietly = TRUE)) {
-  flextable::flextable(demo_table_stoi)
-}
+# CNR Tables and Plots -----------------------------------------
+message("-> Building CNR Outputs...")
+cnr_tables <- build_cnr_tables(reg_clean, annual_pop_island_est, exclude_geos = c("Kanton", "Not Recorded", "Unclassified"))
+cnr_plots <- build_cnr_plots(cnr_tables, exclude_current_year = TRUE)
 
+# Save CNR Plots
+walk2(names(cnr_plots), cnr_plots, ~{
+  ggsave(filename = file.path(outputs_dir, paste0("plot_cnr_", .x, ".png")),
+         plot = .y, width = 10, height = 7, dpi = 300, bg = "white")
+})
 
+# Clinical & Demographic Proportions ----------------------
+message("-> Building Proportion Trends...")
 
-# Build CNR tables -------------------------------------------------
-cnr_tables <- build_cnr_tables(
-  reg_clean = reg_clean,
-  annual_pop_island_est = annual_pop_island_est,
-  exclude_islands = c("kanton", "nr")
-)
+# PTB Proportions
+ptb_data <- build_ptb_prop_tables(reg_clean)
+ptb_plot <- plot_ptb_trends(ptb_data)
 
-# Build CNR plots --------------------------------------------------
-cnr_plots <- build_cnr_plots(
-  cnr_tables = cnr_tables,
-  exclude_current_year = TRUE
-)
+# BC Proportions
+bc_data <- build_bc_prop_tables(reg_clean)
+bc_plot <- plot_bc_trends(bc_data)
 
-# Quick sanity checks ----------------------------------------------
-message("CNR tables built:")
-message(" - island:   ", nrow(cnr_tables$island))
-message(" - division: ", nrow(cnr_tables$division))
-message(" - st_oi:    ", nrow(cnr_tables$st_oi))
+# Childhood (0-9) Proportions
+child_data <- build_childhood_prop_tables(reg_clean)
+child_plot <- plot_childhood_trends(child_data)
 
-# Print plots to Viewer --------------------------------------------
-print(cnr_plots$island)
-print(cnr_plots$division)
-print(cnr_plots$st_oi)
+# Save
+ggsave(file.path(outputs_dir, "plot_trend_ptb.png"), ptb_plot, width = 10, height = 6, dpi = 300, bg = "white")
+ggsave(file.path(outputs_dir, "plot_trend_bc.png"), bc_plot, width = 10, height = 6, dpi = 300, bg = "white")
+ggsave(file.path(outputs_dir, "plot_trend_childhood.png"), child_plot, width = 10, height = 6, dpi = 300, bg = "white")
 
-message("Done. Objects available: reg_clean, annual_pop_island_est, cnr_tables, cnr_plots")
+# 5. Finalize -----------------------------------------------------
+message(">>> Catalog complete! Files saved to: ", outputs_dir)
+
+# Open the folder (Windows specific - remove if on Mac/Linux)
+shell.exec(outputs_dir)
