@@ -64,20 +64,64 @@ skim_results <- reg_combined %>%
 
 write_csv(skim_results, file.path(current_dir, "data_dictionary_raw_skim.csv"))
 
-## Dates age and sex ------------------------------------------
+## Dates using function ------------------------------------------
 
 reg_combined <- reg_combined %>%
   mutate(
-    # Dates
     date_reg_clean = parse_mixed_date(date_registered),
-    date_start_clean = parse_mixed_date(date_started),
-    
-    # Age
-    age_clean = clean_age_column(age),
-    
-    # Sex
-    sex_clean = clean_sex_column(sex)
+    date_start_clean = parse_mixed_date(date_started)
   ) 
+
+## Sex ---------------
+
+reg_combined <- reg_combined %>%
+  mutate(
+
+    # Standardize strings, then convert NA to "Not Recorded" level
+    sex_clean = case_when(
+      is.na(sex) | str_trim(as.character(sex)) == "" ~ NA_character_,
+      str_to_upper(str_trim(as.character(sex))) %in% c("M", "MALE", "MN") ~ "Male",
+      str_to_upper(str_trim(as.character(sex))) %in% c("F", "FEMALE")     ~ "Female",
+      TRUE ~ "unclassified"
+      ) %>% 
+      factor(levels = c("Male", "Female", "unclassified"))
+    )
+
+
+## Age ------------------------
+
+reg_combined <- reg_combined %>%
+  mutate(
+    age_trimmed = str_trim(as.character(age)),
+    age_clean = case_when(
+      # Handle NA inputs first
+      is.na(age_trimmed) | age_trimmed == "" ~ NA_real_,
+      
+      # Rule 1: Already a whole number (integer years)
+      str_detect(age_trimmed, "^\\d+$") ~ as.numeric(age_trimmed),
+      
+      # Rule 2: Weeks format (e.g., "3/52") -> always round up to 1 year
+      str_detect(age_trimmed, "^\\d+\\s*/\\s*52$") ~ 1.0,
+      
+      # Rule 3: Months format X/12 -> round years UP
+      str_detect(age_trimmed, "^\\d+\\s*/\\s*12$") 
+      ~ ceiling(as.numeric(str_extract(age_trimmed, "^\\d+")) / 12),
+      
+      # Rule 4: Months format text (e.g., "9m") -> round years UP
+      str_detect(age_trimmed, "^\\d+\\s*m") 
+      ~ ceiling(as.numeric(str_extract(age_trimmed, "^\\d+")) / 12),
+      
+      # Rule 5: Handle "X+" format (e.g., "70+") -> return the value before the +
+      str_detect(age_trimmed, "^\\d+\\+$") 
+      ~ as.numeric(str_extract(age_trimmed, "^\\d+")),
+      
+      # Default: If none of the above patterns match, result is NA
+      TRUE ~ NA_real_
+    )
+  ) %>% 
+  
+  select(-age_trimmed) # Clean up temporary helper column
+
 
 ## Age groups ------------------------------------------
 
@@ -91,28 +135,20 @@ age_breaks_new   <- c(0, 5, 10, 15, 20, 25, 35, 45, 55, 65)
 # Apply categorization
 reg_combined <- reg_combined %>%
   mutate(
+    # Create the raw epikit objects
+    age_group_10yr_raw = age_categories(age_clean, lower = 0, upper = upper_limit_10yr, by = 10),
+    age_group_who_raw  = age_categories(age_clean, breakers = age_breaks_who),
+    age_group_new_raw  = age_categories(age_clean, breakers = age_breaks_new),
     
-    # Standard 10-year bins (0-9, 10-19... 80+)
-    age_group_10yr = age_categories(
-      age_clean,
-      lower = 0,
-      upper = upper_limit_10yr,
-      by = 10
-    ),
-    
-    # WHO TB Programme standard bins (0-4, 5-14... 65+)
-    age_group_who = age_categories(
-      age_clean,
-      breakers = age_breaks_who
-    ),
-    
-    # New WHO TB Programme bins (0-4, 5-9, 10-14, 15-19... 65+)
-    age_group_new = age_categories(
-      age_clean,
-      breakers = age_breaks_new
-    )
-    
-  ) 
+    # Apply the integrated cleaning and factorizing helper
+    age_group_10yr = finalise_age_groups(age_group_10yr_raw, age_clean),
+    age_group_who  = finalise_age_groups(age_group_who_raw, age_clean),
+    age_group_new  = finalise_age_groups(age_group_new_raw, age_clean)
+  ) %>%
+  # Clean up the temporary raw columns
+  select(-ends_with("_raw"))
+
+## Demo columns ------------------
 
 demo_cols <- c(
   "tb_id", "tb_no", "tb_no_clean", "reg_year", "month_ref",
@@ -227,9 +263,9 @@ reg_combined <- reg_combined %>%
   
   mutate(
     
-    # If island is "nr", ensure division and codes are also "nr" instead of NA
+    # If island is "unclassified", ensure division and codes are also "unclassified" instead of NA
     across(c(division, division_code, island_code), 
-           ~if_else(island == "nr", "nr", as.character(.))),
+           ~if_else(island == "unclassified", "unclassified", as.character(.))),
     
     # island_ST_bin: TRUE only for South Tarawa
     island_ST_bin = !is.na(island) & island == "south tarawa",
@@ -237,10 +273,10 @@ reg_combined <- reg_combined %>%
     # island_NT_bin: TRUE only for North Tarawa
     island_NT_bin = !is.na(island) & island == "north tarawa",
     
-    # OI_ST: "ST" (South Tarawa), "OI" (Outer Islands), or "NR" (Not Recorded)
+    # OI_ST: "ST" (South Tarawa), "OI" (Outer Islands), or "unclassified" (Unclassified)
     OI_ST = case_when(
       island == "south tarawa" ~ "ST",
-      island == "nr"           ~ "NR",
+      island == "unclassified" ~ "unclassified",
       !is.na(island)           ~ "OI", # All other matched islands are Outer Islands
       TRUE                     ~ NA_character_
     )
@@ -249,29 +285,29 @@ reg_combined <- reg_combined %>%
   # Ensure geo codes are factors using the census code ordering
   mutate(
     division = factor(division, 
-                      levels = c(geo_meta$division_names, "nr"),
+                      levels = c(geo_meta$division_names, "unclassified"),
                       # Deal with Line And Pheonix
-                      labels = c(str_to_title(geo_meta$division_names) %>% str_replace(" And ", " and "), "Not Recorded")),
+                      labels = c(str_to_title(geo_meta$division_names) %>% str_replace(" And ", " and "), "Unclassified")),
     
-    division_code = factor(division_code, levels = c(geo_meta$division_codes, "nr")),
+    division_code = factor(division_code, levels = c(geo_meta$division_codes, "unclassified")),
     
     island = factor(island, 
-                    levels = c(geo_meta$island_names, "nr"),
-                    labels = c(str_to_title(geo_meta$island_names), "Not Recorded")),
+                    levels = c(geo_meta$island_names, "unclassified"),
+                    labels = c(str_to_title(geo_meta$island_names), "Unclassified")),
     
-    island_code = factor(island_code, levels = c(geo_meta$island_codes, "nr")),
+    island_code = factor(island_code, levels = c(geo_meta$island_codes, "unclassified")),
     
     ST_village = factor(ST_village, 
-                        levels = c(geo_meta$st_village_names, "nr"),
-                        labels = c(str_to_title(geo_meta$st_village_names), "Not Recorded")),
+                        levels = c(geo_meta$st_village_names, "unclassified"),
+                        labels = c(str_to_title(geo_meta$st_village_names), "Unclassified")),
     
     NT_village = factor(NT_village, 
-                        levels = c(geo_meta$nt_village_names, "nr"),
-                        labels = c(str_to_title(geo_meta$nt_village_names), "Not Recorded")),
+                        levels = c(geo_meta$nt_village_names, "unclassified"),
+                        labels = c(str_to_title(geo_meta$nt_village_names), "Unclassified")),
     
     OI_ST = factor(OI_ST, 
-                   levels = c("ST", "OI", "NR"),
-                   labels = c("South Tarawa", "Outer Islands", "Not Recorded"))
+                   levels = c("ST", "OI", "unclassified"),
+                   labels = c("South Tarawa", "Outer Islands", "Unclassified"))
   )
 
 geo_cols <- c(
@@ -386,9 +422,10 @@ disease_classified_wide <- disease_long %>%
     
     # WHO PTB/EPTB classification
     ptb_eptb = case_when(
-      any(ptb_eptb == "PTB", na.rm = TRUE)  ~ "PTB",
-      any(ptb_eptb == "EPTB", na.rm = TRUE) ~ "EPTB",
-      TRUE                                  ~ NA_character_
+      any(ptb_eptb == "PTB", na.rm = TRUE)          ~ "PTB",
+      any(ptb_eptb == "EPTB", na.rm = TRUE)         ~ "EPTB",
+      any(ptb_eptb == "unclassified", na.rm = TRUE) ~ "unclassified",
+      TRUE                                          ~ NA_character_
     ),
     
     # Site/type classification
@@ -407,7 +444,7 @@ reg_combined <- reg_combined %>%
   left_join(disease_classified_wide, by = "tb_id") %>%
   
   # Make sure that ptb_eptb is a categorical factor with levels
-  mutate(ptb_eptb = factor(ptb_eptb, levels = c("PTB", "EPTB"))) 
+  mutate(ptb_eptb = factor(ptb_eptb, levels = c("PTB", "EPTB", "unclassified"))) 
 
 disease_cols <- c(disease_cols_raw, "has_any_disease_data", disease_template)
 
@@ -434,7 +471,7 @@ cat_template <- c(
 )
 
 # 1. Define the "Master List" of valid category codes
-valid_cat_codes <- c("new", "relapse", "failure", "ltfu", "tf_in", "other", "unknown", "nr")
+valid_cat_codes <- c("new", "relapse", "failure", "ltfu", "tf_in", "other", "unknown", "unclassified")
 
 ## Number of columns with data -------------------------
 
@@ -529,9 +566,9 @@ reg_combined <- reg_combined %>%
   # Convert to Factor with Proper Labels
   mutate(cat_factor = factor(
     cat_factor, 
-    levels = c("new", "relapse", "failure", "ltfu", "tf_in", "other", "unknown", "nr"),
+    levels = c("new", "relapse", "failure", "ltfu", "tf_in", "other", "unknown", "unclassified"),
     labels = c("New", "Relapse", "Treatment after failure", "Treatment after LTFU", 
-               "Transfer in", "Other", "Unknown", "Not recorded")
+               "Transfer in", "Other", "Unknown", "Unclassified")
   )) %>%
   
   # Remove
@@ -661,9 +698,9 @@ reg_combined <- reg_combined %>%
     bac_all_cat = vapply(bac_all_blob, classify_bac_blob, character(1))
   ) %>%
   mutate(
-    bac_dx_cat  = factor(bac_dx_cat,  levels = c("pos", "neg", "nr")),
-    bac_eot_cat = factor(bac_eot_cat, levels = c("pos", "neg", "nr")),
-    bac_all_cat = factor(bac_all_cat, levels = c("pos", "neg", "nr"))
+    bac_dx_cat  = factor(bac_dx_cat,  levels = c("pos", "neg", "unclassified")),
+    bac_eot_cat = factor(bac_eot_cat, levels = c("pos", "neg", "unclassified")),
+    bac_all_cat = factor(bac_all_cat, levels = c("pos", "neg", "unclassified"))
   ) %>% 
   
   mutate(
@@ -686,12 +723,12 @@ reg_combined <- reg_combined %>%
       !is.na(bc_reg_clean) & !is.na(cd_reg_clean) & (
         (bc_reg_clean %in% c("bc", "bd") & cd_reg_clean == "cd") |
           (bc_reg_clean == "cd"            & cd_reg_clean %in% c("bc", "bd"))
-      ) ~ "disc",
+      ) ~ "unclassified",
       
       # Anything else unusual but present
-      TRUE ~ "disc"
+      TRUE ~ "unclassified"
     ),
-    bc_cd_reg = factor(bc_cd_reg, levels = c("bc", "cd", "disc")),
+    bc_cd_reg = factor(bc_cd_reg, levels = c("bc", "cd", "unclassified")),
     
     # Registration-derived binary BC flag
     bc_reg_bin = case_when(
@@ -705,18 +742,61 @@ reg_combined <- reg_combined %>%
     
     # Composite rules (BC if any evidence)
     bc_dx_comp_bin  = bc_dx_bin  | bc_reg_bin,
-    bc_all_comp_bin = bc_all_bin | bc_reg_bin
-  ) 
+    bc_all_comp_bin = bc_all_bin | bc_reg_bin,
+    
+    # Composite Factor Rules: Resolution of Diagnosis
+    # Priority 1: Any BC evidence -> "bc"
+    # Priority 2: Any "unclassified" signal (in either source) -> "unclassified"
+    # Priority 3: CD evidence (and no BC/Unclassified signals) -> "cd"
+    
+    bc_cd_dx_comp = case_when(
+      
+      # If binary composite is TRUE, it's BC (Highest Priority)
+      bc_dx_comp_bin == TRUE ~ "bc",
+      
+      # Check for "cd" or "neg" (If no BC and no Unclassified, it's CD)
+      bc_cd_reg == "cd" | bac_dx_cat == "neg" ~ "cd",
+      
+      # Check for "unclassified" in either the register or the diagnostic blob
+      bc_cd_reg == "unclassified" | bac_dx_cat == "unclassified" ~ "unclassified",
+      
+      # Default to NA if everything is blank
+      TRUE ~ NA_character_
+    ),
+    
+    bc_cd_all_comp = case_when(
+      
+      # Any BC evidence across the whole course of treatment
+      bc_all_comp_bin == TRUE ~ "bc",
+      
+      # CD evidence
+      bc_cd_reg == "cd" | bac_all_cat == "neg" ~ "cd",
+      
+      # Unclassified signals
+      bc_cd_reg == "unclassified" | bac_all_cat == "unclassified" ~ "unclassified",
+      
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  
+  # Convert to Factors with standard levels
+  mutate(
+    across(c(bc_cd_dx_comp, bc_cd_all_comp), 
+           ~ factor(.x, levels = c("bc", "cd", "unclassified")))
+  )
+
 
 bac_cols <- c(
   "disease_site_bc_2017", "bc_reg_clean", "disease_site_cd_2017", "cd_reg_clean", "bc_cd_reg",
   bac_cols_dx, bac_cols_mon, bac_cols_eot,
   "bac_dx_blob", "bac_dx_cat", "bac_eot_blob", "bac_eot_cat", "bac_all_blob", "bac_all_cat",
-  "bc_reg_bin", "bc_dx_bin", "bc_all_bin", "bc_dx_comp_bin", "bc_all_comp_bin")
+  "bc_reg_bin", "bc_dx_bin", "bc_all_bin", "bc_dx_comp_bin", "bc_all_comp_bin",
+  "bc_cd_dx_comp", "bc_cd_all_comp")
 
 bac_cols_clean <- c(
   "bc_cd_reg", "bac_dx_cat", "bac_eot_cat", "bac_all_cat",
-  "bc_reg_bin", "bc_dx_bin", "bc_all_bin", "bc_dx_comp_bin", "bc_all_comp_bin")
+  "bc_reg_bin", "bc_dx_bin", "bc_all_bin", "bc_dx_comp_bin", "bc_all_comp_bin",
+  "bc_cd_dx_comp", "bc_cd_all_comp")
 
 
 
@@ -743,6 +823,9 @@ reg_combined <- reg_combined %>%
     # Classify
     drtb_factor = case_when(
       
+      #NA is NA
+      is.na(drtb_raw) ~ NA_character_,
+      
       # Explicit DS-TB / no resistance
       drtb_raw %in% c("n", "no", "none", "nil", "neg", "negative", "dstb", "ds-tb", "ds") ~ "dstb",
       
@@ -750,22 +833,19 @@ reg_combined <- reg_combined %>%
       drtb_raw %in% c("u", "unknown", "nr", "not recorded") ~ "nr",
       
       # Any RR / MDR / XDR signal
-      str_detect(
-        drtb_raw,
-        "\\b(rr|mdr|xdr)\\b|rr\\s*/\\s*mdr|rr\\s+mdr"
-      ) ~ "drtb",
+      str_detect(drtb_raw, "\\b(rr|mdr|xdr)\\b|rr\\s*/\\s*mdr|rr\\s+mdr") ~ "drtb",
       
       # Catch common shorthand variants
       drtb_raw %in% c("(r/r)", "r/r") ~ "drtb",
       
       # Anything else mark as NA
-      TRUE ~ NA_character_
+      TRUE ~ "unclassified"
     ),
     
     # Stable factor
     drtb_factor = factor(
       drtb_factor,
-      levels = c("dstb", "drtb", "nr")
+      levels = c("dstb", "drtb", "nr", "unclassified")
     )
   )
 
@@ -833,7 +913,7 @@ regimen_template <- c(
   "regimen_note"    # modifiers, toxicity, free text
 )
 
-valid_regimen_codes <- c("cat1", "cat2", "cat3")
+valid_regimen_codes <- c("cat1", "cat2", "cat3", "unclassified")
 
 regimen_lookup_path <- here("data-raw", "unique_regimen_lookup.csv")
 if (!file.exists(regimen_lookup_path)) stop("! Regimen lookup not found.")
@@ -872,7 +952,7 @@ reg_combined <- reg_combined %>%
     regimen_factor = factor(
       regimen_factor,
       levels = valid_regimen_codes,
-      labels = c("Category 1", "Category 2", "Category 3")
+      labels = c("Category 1", "Category 2", "Category 3", "Unclassified")
     )
   )
 
@@ -892,7 +972,7 @@ outcome_cols_raw <- reg_combined_raw %>%
   colnames()
 
 # Define valid outcome codes
-valid_outcome_codes <- c("cured", "completed", "failed", "died", "ltfu", "tf_out", "ne", "sld")
+valid_outcome_codes <- c("cured", "completed", "failed", "died", "ltfu", "tf_out", "ne", "sld", "unclassified")
 
 # Flag: any outcome data present 
 reg_combined <- reg_combined %>%
@@ -1037,6 +1117,7 @@ reg_combined <- reg_combined %>%
     outcome_factor = case_when(
       !is.na(outcome_factor_manual) ~ outcome_factor_manual,
       !is.na(outcome_factor)        ~ outcome_factor,
+      !is.na(outcome_key)           ~ "unclassified",
       TRUE                          ~ NA_character_
     ),
     outcome_date = case_when(
@@ -1061,7 +1142,8 @@ reg_combined <- reg_combined %>%
         "Lost to follow-up",
         "Transferred out",
         "Not evaluated",
-        "Second-line drugs"
+        "Second-line drugs",
+        "Unclassified"
       )
     )
   ) %>%
@@ -1124,6 +1206,7 @@ cleaning_map <- tribble(
   "date_registered",        "date_reg_clean",   "Date invalid or outside range",
   "date_started",           "date_start_clean", "Date invalid or outside range",
   "age",                    "age_clean",        "Unrecognized age format",
+  "age_clean",              "age_group_new",    "Age category unassigned",
   "sex",                    "sex_clean",        "Unknown sex code",
   
   # Geography Audits
