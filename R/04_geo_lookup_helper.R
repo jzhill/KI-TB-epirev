@@ -98,8 +98,8 @@ geo_processed <- geo_processed %>%
     # Island allocation based on search and manual inputs
     
     island = case_when(
-      # Manual entry (including "nr") is priority
-      !is.na(island_manual) & (island_manual %in% c(island_names, "nr")) ~ as.character(island_manual),
+      # Manual entry (including "unclassified") is priority
+      !is.na(island_manual) & (island_manual %in% c(island_names, "unclassified")) ~ as.character(island_manual),
       
       # Single direct match in search (no hyphens allowed)
       !is.na(island_search) & !str_detect(island_search, "-") ~ island_search,
