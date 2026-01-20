@@ -176,34 +176,30 @@ build_demo_table_stoi <- function(
           value = as.character(!!var_sym),
           
           # If we are processing the regional cohort, keep the ST/OI labels
-          group = if(use_stoi_filter) OI_ST else "All"
+          group = if(use_stoi_filter) as.character(OI_ST) else "All"
         ) %>%
         
         mutate(
           
-          # Empty strings: convert any "" to actual NAs for consistent handling
-          value = na_if(value, ""),
-          
-          # Unknowns: applies global toggle to keep NAs in the column as "Unknown" if TRUE
-          value = if (include_unknown_rows) {
-            if_else(is.na(value) | value == "Not Recorded", "Unknown", value)
-          } else value
+          # Handling of NA, Unclassified, NR
+          # Convert any "" to actual NAs
+          value = case_when(
+            is.na(value) | value == "" ~ "Not Recorded", # Truly blank
+            value == "unclassified" ~ "Unclassified", # Algorithmic failure
+            TRUE ~ value           # Valid clinical data
+          )
         )
       
       # Unknowns: applies toggle to filter out missing values if parameter is FALSE
       if (!include_unknown_rows) {
-        d <- filter(d, !is.na(value))
+        d <- filter(d, !(value %in% c("Not Recorded", "Unclassified")))
       }
       
-      # Apply manual label overrides (e.g., c("M" = "Male")) if provided
-      if (!is.null(label_map)) {
-        d <- mutate(d, value = recode(value, !!!label_map, .default = value))
-      }
-      
-      # Convert to factor to control the order of rows in the final table
-      # (e.g., ensuring "Male" always appears above "Female")
+      # Force "Unclassified" and "Not Recorded" to the end of the factor levels
+      # but only if they weren't already explicitly ordered in 'levels'
       if (!is.null(levels)) {
-        d <- mutate(d, value = factor(value, levels = levels))
+        clean_levels <- setdiff(levels, c("Unclassified", "Not Recorded"))
+        d <- mutate(d, value = factor(value, levels = c(clean_levels, "Unclassified", "Not Recorded")))
       }
       
       return(d)
@@ -252,7 +248,7 @@ build_demo_table_stoi <- function(
   # Sex
   sex_tab <- tab_one(
     sex_clean,
-    levels = c("Female", "Male", "Unknown"),
+    levels = c("Female", "Male", "Unclassified", "Not Recorded"),
     block = "Sex"
   )
   
@@ -275,7 +271,7 @@ build_demo_table_stoi <- function(
   # Disease type
   disease_tab <- tab_one(
     ptb_eptb,
-    levels = c("PTB", "EPTB", "Unknown"),
+    levels = c("PTB", "EPTB", "Unclassified", "Not Recorded"),
     block = "Disease type"
   )
   
@@ -283,11 +279,17 @@ build_demo_table_stoi <- function(
   df_all <- df_all %>%
     mutate(
       bc_status = case_when(
-        bc_dx_comp_bin == TRUE  ~ "BC",
-        bc_dx_comp_bin == FALSE ~ "CD",
-        TRUE                    ~ "Unknown"
+        bc_cd_dx_comp == "bc" ~ "BC",
+        bc_cd_dx_comp == "cd" ~ "CD",
+        bc_cd_dx_comp == "unclassified" ~ "Unclassified",
+        TRUE ~ "Not Recorded"
       ),
-      drtb_status = if_else(as.character(drtb_factor) == "drtb", "DR-TB", "No DR-TB identified")
+      drtb_status = case_when(
+        drtb_factor == "drtb" ~ "DR-TB",
+        drtb_factor == "dstb" ~ "No DR-TB identified",
+        drtb_factor == "unclassified" ~ "Unclassified",
+        TRUE ~ "Not Recorded"
+      )
     )
   
   # Bacteriology and DRTB - add '_status'  columns to df_stoi from df_all idempotently
@@ -298,7 +300,7 @@ build_demo_table_stoi <- function(
   # Bacteriology
   bac_tab <- tab_one(
     bc_status, 
-    levels = c("BC", "CD", "Unknown"), 
+    levels = c("BC", "CD"), 
     block = "Bacteriology"
     )
   
@@ -405,7 +407,7 @@ aggregate_population_to_geo <- function(pop_data, geo_var) {
 # - case_counts:          geo, year, cases
 # For use in build_cnr_tables()
 
-build_cnr_tables <- function(reg_clean, annual_pop_island_est, exclude_geos = c("Not Recorded")) {
+build_cnr_tables <- function(reg_clean, annual_pop_island_est, exclude_geos = c("Unclassified")) {
   
   # Sync year range across datasets
   years <- get_complete_register_years(reg_clean)
@@ -534,3 +536,237 @@ build_cnr_plots <- function(cnr_tables, exclude_current_year = TRUE) {
     island   = make_plot(cnr_tables$island, "CNR by Individual Island", facet = TRUE)
   )
 }
+
+# Proportion PTB output functions ------------------
+
+## Numerator/Denominator: Calculate PTB Proportions --------------------------
+
+# Creates the data frame for PTB proportions
+# Returns: year, geo, cases (PTB), total (All), and proportion
+
+calculate_ptb_trends <- function(reg_clean, geo_var) {
+  geo_var_sym <- rlang::ensym(geo_var)
+  
+  reg_clean %>%
+    # Filter for valid years
+    filter(!is.na(reg_year), !is.na(!!geo_var_sym)) %>%
+    group_by(year = reg_year, geo = !!geo_var_sym) %>%
+    summarise(
+      ptb_n = sum(ptb_eptb == "PTB", na.rm = TRUE),
+      total_n = n(),
+      prop = (ptb_n / total_n),
+      .groups = "drop"
+    )
+}
+
+
+## Build PTB Proportion Tables ---------------------------------
+
+build_ptb_prop_tables <- function(reg_clean) {
+  
+  # 1. Sync years
+  years <- get_complete_register_years(reg_clean)
+  df <- reg_clean %>% filter(reg_year %in% years)
+  
+  # 2. Regional Analysis (ST/OI)
+  # Filter to only the two levels we want for the comparison
+  regional_df <- df %>% 
+    filter(OI_ST %in% c("South Tarawa", "Outer Islands")) %>%
+    calculate_ptb_trends(OI_ST)
+  
+  # 3. National Analysis (All)
+  national_df <- df %>%
+    group_by(year = reg_year) %>%
+    summarise(
+      ptb_n = sum(ptb_eptb == "PTB", na.rm = TRUE),
+      total_n = n(),
+      prop = (ptb_n / total_n),
+      .groups = "drop"
+    ) %>%
+    mutate(geo = "National")
+  
+  # 4. Combine for a single plotting object
+  combined_trends <- bind_rows(national_df, regional_df) %>%
+    mutate(geo = factor(geo, levels = c("National", "South Tarawa", "Outer Islands")))
+  
+  return(combined_trends)
+}
+
+
+## Build PTB Proportion Plot -----------------------------------
+
+plot_ptb_trends <- function(ptb_trends_df) {
+  
+  ggplot(ptb_trends_df, aes(x = year, y = prop, color = geo, group = geo)) +
+
+    geom_line(linewidth = 1) +
+    geom_point(size = 2) +
+    
+    # Visuals
+    theme_ki_tb() +
+    scale_y_continuous(labels = scales::percent_format(), limits = c(0, 1)) +
+    scale_x_continuous(breaks = scales::pretty_breaks()) +
+    scale_color_manual(values = c(
+      "National" = "black", 
+      "South Tarawa" = "#E69F00", # Specific color for ST
+      "Outer Islands" = "#56B4E9"  # Specific color for OI
+    )) +
+    
+    labs(
+      title = "Proportion of Pulmonary TB (PTB) Cases Over Time",
+      subtitle = "Denominator includes all registered cases (including unclassified)",
+      x = "Year",
+      y = "Percent of Total Notifications",
+      color = NULL
+    )
+}
+
+
+
+# Proportion BC output functions ----------------
+
+## Build BC Proportion Tables ---------------------------------
+
+build_bc_prop_tables <- function(reg_clean) {
+  
+  # 1. Sync years
+  years <- get_complete_register_years(reg_clean)
+  df <- reg_clean %>% filter(reg_year %in% years)
+  
+  # 2. Internal calculation logic (Numerator = "bc")
+  calc_bc <- function(dat, geo_var) {
+    geo_var_sym <- rlang::ensym(geo_var)
+    dat %>%
+      filter(!is.na(!!geo_var_sym)) %>%
+      group_by(year = reg_year, geo = !!geo_var_sym) %>%
+      summarise(
+        bc_n = sum(bc_cd_dx_comp == "bc", na.rm = TRUE),
+        total_n = n(),
+        prop = (bc_n / total_n),
+        .groups = "drop"
+      )
+  }
+  
+  # 3. National vs Regional
+  national_df <- df %>%
+    group_by(year = reg_year) %>%
+    summarise(
+      bc_n = sum(bc_cd_dx_comp == "bc", na.rm = TRUE),
+      total_n = n(),
+      prop = (bc_n / total_n),
+      .groups = "drop"
+    ) %>%
+    mutate(geo = "National")
+  
+  regional_df <- calc_bc(df %>% filter(OI_ST %in% c("South Tarawa", "Outer Islands")), OI_ST)
+  
+  # 4. Combine
+  bind_rows(national_df, regional_df) %>%
+    mutate(geo = factor(geo, levels = c("National", "South Tarawa", "Outer Islands")))
+}
+
+
+## Build BC Proportion Plot -----------------------------------
+
+plot_bc_trends <- function(bc_trends_df) {
+  
+  ggplot(bc_trends_df, aes(x = year, y = prop, color = geo, group = geo)) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 2) +
+    
+    # Visuals
+    theme_ki_tb() +
+    scale_y_continuous(labels = scales::percent_format(), limits = c(0, 1)) +
+    scale_x_continuous(breaks = scales::pretty_breaks()) +
+    scale_color_manual(values = c(
+      "National" = "black", 
+      "South Tarawa" = "#E69F00", 
+      "Outer Islands" = "#56B4E9"
+    )) +
+    
+    labs(
+      title = "Proportion of Bacteriologically Confirmed (BC) TB Cases",
+      subtitle = "Based on composite diagnostic logic (Smear/Xpert/Culture and Register)",
+      x = "Year",
+      y = "Percent of Total Notifications",
+      color = NULL
+    )
+}
+
+
+# Proportion children 0-9 ----------------------
+
+## Build Childhood TB Proportion Tables ---------------------------------
+
+build_childhood_prop_tables <- function(reg_clean) {
+  
+  # 1. Sync years
+  years <- get_complete_register_years(reg_clean)
+  df <- reg_clean %>% filter(reg_year %in% years)
+  
+  # 2. Helper for regional calculation
+  # Numerator = "0-9" bin
+  calc_regional_child <- function(dat, geo_var) {
+    geo_var_sym <- rlang::ensym(geo_var)
+    dat %>%
+      filter(!is.na(!!geo_var_sym)) %>%
+      group_by(year = reg_year, geo = !!geo_var_sym) %>%
+      summarise(
+        child_n = sum(age_group_10yr == "0-9", na.rm = TRUE),
+        total_n = n(),
+        prop = (child_n / total_n),
+        .groups = "drop"
+      )
+  }
+  
+  # 3. National Analysis
+  national_df <- df %>%
+    group_by(year = reg_year) %>%
+    summarise(
+      child_n = sum(age_group_10yr == "0-9", na.rm = TRUE),
+      total_n = n(),
+      prop = (child_n / total_n),
+      .groups = "drop"
+    ) %>%
+    mutate(geo = "National")
+  
+  # 4. Regional Analysis (Fixed the function call here)
+  regional_df <- calc_regional_child(
+    df %>% filter(OI_ST %in% c("South Tarawa", "Outer Islands")), 
+    OI_ST
+  )
+  
+  # 5. Combine for a single plotting object
+  bind_rows(national_df, regional_df) %>%
+    mutate(geo = factor(geo, levels = c("National", "South Tarawa", "Outer Islands")))
+}
+
+
+
+## Build Childhood TB Proportion Plot -----------------------------------
+
+plot_childhood_trends <- function(child_trends_df) {
+  
+  ggplot(child_trends_df, aes(x = year, y = prop, color = geo, group = geo)) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 2) +
+    
+    # Visuals
+    theme_ki_tb() +
+    scale_y_continuous(labels = scales::percent_format(), limits = c(0, NA)) + # Start at 0
+    scale_x_continuous(breaks = scales::pretty_breaks()) +
+    scale_color_manual(values = c(
+      "National" = "black", 
+      "South Tarawa" = "#E69F00", 
+      "Outer Islands" = "#56B4E9"
+    )) +
+    
+    labs(
+      title = "Proportion of Childhood TB Cases (Ages 0-9)",
+      subtitle = "Denominator includes all registered cases (including those with missing age)",
+      x = "Year",
+      y = "Percent of Total Notifications",
+      color = NULL
+    )
+}
+
