@@ -306,6 +306,48 @@ export_unique_values_template <- function(data, target_cols, output_path,
   return(current_uniques)
 }
 
+# Pulls official geo names from geo_helper
+get_official_geo_metadata <- function(geo_path = here("data-raw", "geo_helper.xlsx")) {
+  
+  if (!file.exists(geo_path)) stop("! Geo helper (xlsx) not found.")
+  
+  # Load the raw census mapping
+  census_codes_df <- readxl::read_excel(geo_path, sheet = "census_codes") %>%
+    mutate(across(everything(), ~str_trim(str_to_lower(as.character(.)))))
+  
+  # Universal helper to extract unique, ordered levels
+  # Can filter by island_name (for villages) or be left NULL (for islands/divisions)
+  get_levels <- function(name_col, code_col, filter_col = NULL, filter_val = NULL) {
+    d <- census_codes_df
+    
+    if (!is.null(filter_col) & !is.null(filter_val)) {
+      d <- d %>% filter(!!sym(filter_col) == filter_val)
+    }
+    
+    d %>%
+      distinct(!!sym(name_col), !!sym(code_col)) %>%
+      arrange(as.numeric(!!sym(code_col))) %>%
+      pull(!!sym(name_col)) %>%
+      unique()
+  }
+  
+  # Return structured metadata, names ordered by census code
+  
+  list(
+    # Primary reporting levels (for 04_ and CNR plots)
+    island_names   = get_levels("island_name", "island_code"),
+    island_codes   = get_levels("island_code", "island_code"),
+    division_names = get_levels("division_name", "division_code"),
+    division_codes = get_levels("division_code", "division_code"),
+    
+    # Village levels (for 02_ address cleaning)
+    st_village_names = get_levels("village_name", "village_code", "island_name", "south tarawa"),
+    nt_village_names = get_levels("village_name", "village_code", "island_name", "north tarawa"),
+    
+    census_codes = census_codes_df
+  )
+}
+
 
 
 # Defensive TB number formatter (Extracts digits then pads)
