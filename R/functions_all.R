@@ -156,10 +156,12 @@ log_cleaning_issue <- function(data, raw_col, clean_col, error_msg) {
     )
 }
 
-# Batch Auditor: Compares raw vs clean columns based on a validation map
+
+# Generate an error log comparing raw values with cleaned
+# Captures if cleaned is left blank or "unclassified"
+
 generate_error_log <- function(data, validation_map) {
   
-  # Use map_df to iterate through the map and combine results into one tibble
   map_df(1:nrow(validation_map), function(i) {
     row_spec <- validation_map[i, ]
     raw_col <- row_spec$raw
@@ -167,18 +169,59 @@ generate_error_log <- function(data, validation_map) {
     error_msg <- row_spec$msg
     
     data %>%
-      # Find rows where original had data but clean version is NA
-      filter(!is.na(!!sym(raw_col)) & is.na(!!sym(clean_col))) %>%
+      mutate(
+        temp_raw = as.character(!!sym(raw_col)),
+        # Standardize for logical check
+        temp_clean_check = str_to_lower(as.character(!!sym(clean_col)))
+      ) %>%
+      
+      # THE LOGIC GATE:
+      filter(
+        # 1. Does raw data exist?
+        !is.na(temp_raw) & temp_raw != "" & 
+          
+          # 2. Is the clean result a failure?
+          (is.na(temp_clean_check) | temp_clean_check == "unclassified" | temp_clean_check == "unknown")
+      ) %>%
+      
       transmute(
         tb_id,
         name,
-        value = as.character(!!sym(raw_col)),  # <<< CHANGE: coerce to character
+        raw_value = temp_raw,
+        # FORCE CHARACTER: This prevents the 'Can't combine <date> and <double>' error
+        clean_state = as.character(!!sym(clean_col)), 
         field = raw_col,
-        error = error_msg
+        error = case_when(
+          str_to_lower(clean_state) == "unclassified" ~ paste0("Unclassified: ", error_msg),
+          TRUE ~ error_msg
+        )
       )
   })
 }
 
+
+
+# categorise "unclassified" from age groups and then factorise
+finalise_age_groups <- function(age_cat_vector, age_numeric_vector) {
+  
+  # Extract the original levels from the epikit factor
+  orig_levels <- levels(age_cat_vector)
+  
+  # Create the character vector with our forensic logic
+  cleaned_vec <- case_when(
+    # Truly missing numeric age
+    is.na(age_numeric_vector) ~ NA_character_,
+    
+    # Numeric age exists but was NOT binned by epikit (out of bounds)
+    !is.na(age_numeric_vector) & is.na(age_cat_vector) ~ "unclassified",
+    
+    # Successful binning
+    TRUE ~ as.character(age_cat_vector)
+  )
+  
+  # Return as factor with the original bins first, then unclassified
+  factor(cleaned_vec, levels = c(orig_levels, "unclassified"))
+}
 
 
 
@@ -242,12 +285,14 @@ export_unique_values_template <- function(data, target_cols, output_path,
     if (!is.null(lookup_data)) {
       message("-> Pre-filling audit with existing lookup data...")
       
+      # This prevents "many-to-many" row explosions during the audit export
+      lookup_safe <- lookup_data %>% 
+        select(-any_of(c("raw_value", "n", "columns_present"))) %>%
+        distinct(original_column, clean_value, .keep_all = TRUE)
+      
       # We join based on the context (column + clean_value)
       current_uniques <- current_uniques %>%
-        left_join(
-          lookup_data %>% select(-any_of(c("raw_value", "n", "columns_present"))), # Don't duplicate columns
-          by = c("original_column", "clean_value")
-        )
+        left_join(lookup_safe, by = c("original_column", "clean_value"))
     }
     
   } else {
@@ -385,52 +430,6 @@ parse_mixed_date <- function(date_vector, min_year = 1990, max_year = 2030) {
   return(final_dates)
 }
 
-# Standardizes Age strings to numeric years
-clean_age_column <- function(age_vector) {
-  
-  # Clean age input first (trim whitespace)
-  age_trimmed <- str_trim(as.character(age_vector))
-  
-  case_when(
-    # Handle NA inputs first
-    is.na(age_trimmed) | age_trimmed == "" ~ NA_real_,
-    
-    # Rule 1: Already a whole number (integer years)
-    str_detect(age_trimmed, "^\\d+$") ~ as.numeric(age_trimmed),
-    
-    # Rule 2: Weeks format (e.g., "3/52") -> always round up to 1 year
-    str_detect(age_trimmed, "^\\d+\\s*/\\s*52$") ~ 1.0,
-    
-    # Rule 3: Months format X/12 -> round years UP
-    str_detect(age_trimmed, "^\\d+\\s*/\\s*12$") 
-    ~ ceiling(as.numeric(str_extract(age_trimmed, "^\\d+")) / 12),
-    
-    # Rule 4: Months format text (e.g., "9m") -> round years UP
-    str_detect(age_trimmed, "^\\d+\\s*m") 
-    ~ ceiling(as.numeric(str_extract(age_trimmed, "^\\d+")) / 12),
-    
-    # Rule 5: Handle "X+" format (e.g., "70+") -> return the value before the +
-    str_detect(age_trimmed, "^\\d+\\+$") 
-    ~ as.numeric(str_extract(age_trimmed, "^\\d+")),
-    
-    # Default: If none of the above patterns match, result is NA
-    TRUE ~ NA_real_
-  )
-}
-
-# Standardizes Sex strings into a factor (Male/Female)
-clean_sex_column <- function(sex_vector) {
-  standardized <- case_match(
-    str_to_upper(str_trim(as.character(sex_vector))),
-    c("M", "MALE", "MN") ~ "Male",
-    c("F", "FEMALE")     ~ "Female",
-    .default = NA_character_
-  )
-  
-  # Return as a factor with explicit levels
-  return(factor(standardized, levels = c("Male", "Female")))
-}
-
 
 
 # Classify bacteriology blob 
@@ -474,9 +473,9 @@ classify_bac_blob <- function(blob) {
     "rpt\\s*-?\\s*\\d+\\s*days\\s*-\\s*neg"
   )
   
-  # NR markers (recorded but not interpretable)
+  # Unclassified markers (recorded but not interpretable)
   
-  nr_patterns <- c(
+  unc_patterns <- c(
     "\\bo/s\\b",
     "cartridge", "stock", "low\\s*cartridge", "low\\s*stock",
     "lab\\s*form\\s*lost",
@@ -496,12 +495,12 @@ classify_bac_blob <- function(blob) {
   has_neg <- any(str_detect(x, neg_patterns))
   if (has_neg) return("neg")
   
-  # If text exists but no matches, still "nr"
-  # NR markers are not required; they just document known non-result tokens
-  has_nr_marker <- any(str_detect(x, nr_patterns))
-  if (has_nr_marker) return("nr")
+  # If text exists but no matches, still "unclassified"
+  # Unclassified markers are not required; they just document known non-result tokens
+  has_unc_marker <- any(str_detect(x, unc_patterns))
+  if (has_unc_marker) return("unclassified")
   
-  "nr"
+  "unclassified"
 }
 
 
