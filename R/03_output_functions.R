@@ -770,3 +770,93 @@ plot_childhood_trends <- function(child_trends_df) {
     )
 }
 
+
+# Monthly times series analysis
+
+## Monthly Notification tables -----------------------------------------------
+
+# Aggregates data into a monthly time series with flexible date filtering
+build_monthly_trend_data <- function(
+    reg_clean, 
+    start_date = "1998-01-01", 
+    end_date = "2024-12-01",
+    geo_filter = NULL
+) {
+  
+  # Convert inputs to Date objects to ensure safety
+  start_d <- as.Date(start_date)
+  end_d   <- as.Date(end_date)
+  
+  df <- reg_clean %>%
+    filter(!is.na(date_reg_clean)) %>%
+    mutate(month_date = lubridate::floor_date(date_reg_clean, "month"))
+  
+  # Optional Geographic Filter
+  if (!is.null(geo_filter)) {
+    df <- df %>% filter(OI_ST == geo_filter)
+  }
+  
+  df %>%
+    # Use the parameters provided to the function
+    filter(month_date >= start_d, month_date <= end_d) %>%
+    group_by(month_date) %>%
+    summarise(n = n(), .groups = "drop") %>%
+    # Ensure every month in the range exists, even if counts are 0
+    tidyr::complete(
+      month_date = seq(start_d, end_d, by = "1 month"),
+      fill = list(n = 0)
+    )
+}
+## Plot monthly time series ----------
+
+# Plots the monthly time series
+plot_monthly_trend <- function(monthly_data) {
+  ggplot(monthly_data, aes(x = month_date, y = n)) +
+    geom_line(color = "black", linewidth = 0.5) +
+    # Add a smoothing line (Loess) to help see the underlying signal through the noise
+    geom_smooth(method = "loess", span = 0.2, color = "red", se = FALSE, linetype = "dashed") +
+    theme_ki_tb() +
+    scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
+    labs(
+      title = "Monthly TB Case Notifications in Kiribati",
+      subtitle = "Black line: raw monthly counts; Red dashed: Loess smoothed trend",
+      x = "Registration Month",
+      y = "Number of Notifications"
+    )
+}
+
+## Seasonal Subseries Plot --------------
+
+plot_seasonal_subseries <- function(monthly_data) {
+  
+  sub_data <- monthly_data %>%
+    mutate(
+      month_label = lubridate::month(month_date, label = TRUE, abbr = TRUE),
+      year = lubridate::year(month_date)
+    )
+  
+  monthly_means <- sub_data %>%
+    group_by(month_label) %>%
+    summarise(mean_n = mean(n), .groups = "drop")
+  
+  ggplot(sub_data, aes(x = year, y = n)) +
+    geom_line(color = "grey70", linewidth = 0.3) +
+    geom_hline(data = monthly_means, aes(yintercept = mean_n), 
+               color = "blue", linetype = "dashed") +
+    facet_grid(. ~ month_label) +
+    theme_ki_tb() +
+    scale_x_continuous(breaks = c(2000, 2010, 2020), labels = c("'00", "'10", "'20")) +
+    theme(
+      panel.spacing = unit(0.2, "lines"),
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+      strip.background = element_rect(fill = "grey90")
+    ) +
+    labs(
+      title = "Seasonal Subseries: TB Notifications by Month",
+      subtitle = paste0("Blue dashed line: monthly mean (", 
+                        min(lubridate::year(monthly_data$month_date)), "–", 
+                        max(lubridate::year(monthly_data$month_date)), ")"),
+      x = "Year",
+      y = "Monthly Notifications"
+    )
+}
