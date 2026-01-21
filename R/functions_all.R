@@ -73,12 +73,15 @@ import_and_name_sheet <- function(path, sheet_name, start_row, end_row, metadata
 find_register_start_row <- function(df, rows_to_check = 20) {
   start_row <- NA
   for (i in 1:min(nrow(df), rows_to_check)) {
-    val_c <- suppressWarnings(as.numeric(as.character(df[[3]][i]))) # TB No
-    val_d <- as.character(df[[4]][i])                             # Name
+    val_c <- suppressWarnings(as.numeric(as.character(df[[3]][i]))) 
+    val_d <- as.character(df[[4]][i]) # Name is a character string in column D
     val_e <- str_to_upper(str_trim(as.character(df[[5]][i])))
     
-    is_c_int <- !is.na(val_c) && val_c > 0 && round(val_c) == val_c
+    # TB No is a number in column C
+    is_c_int <- !is.na(val_c) && val_c > 0 && round(val_c) == val_c 
+    # Name is a text string in column D
     is_d_chr <- !is.na(val_d) && str_length(val_d) > 1 && is.na(suppressWarnings(as.numeric(val_d)))
+    # Sex is a string in the pattern below in column E
     is_e_sex <- val_e %in% c("M", "F", "MALE", "FEMALE")
     
     if (is_c_int && is_d_chr && is_e_sex) {
