@@ -28,7 +28,7 @@ if (!dir.exists(outputs_dir)) dir.create(outputs_dir, recursive = TRUE)
 
 
 # Load Data
-reg_clean <- qread(file.path(ref_dir, "register_combined_clean.qs"))
+reg_clean <- qread(file.path(current_dir, "register_combined_clean.qs"))
 annual_pop_island_est <- get_annual_pop_island_est()
 
 year_min <- min(reg_clean$reg_year, na.rm = TRUE)
@@ -78,8 +78,35 @@ ggsave(file.path(outputs_dir, "plot_trend_ptb.png"), ptb_plot, width = 10, heigh
 ggsave(file.path(outputs_dir, "plot_trend_bc.png"), bc_plot, width = 10, height = 6, dpi = 300, bg = "white")
 ggsave(file.path(outputs_dir, "plot_trend_childhood.png"), child_plot, width = 10, height = 6, dpi = 300, bg = "white")
 
+# Monthly Notifications Analysis --------------------------
+message("-> Building Monthly Notification Trends...")
+
+# Define the window based on your study parameters
+start_analysis <- paste0(year_min, "-01-01")
+end_analysis   <- "2024-12-01" # Hard cap for current register year
+
+# 1. Generate data
+monthly_data <- build_monthly_trend_data(
+  reg_clean, 
+  start_date = start_analysis, 
+  end_date = end_analysis
+)
+
+# 2. Build Plots
+monthly_plot  <- plot_monthly_trend(monthly_data)
+seasonal_plot <- plot_seasonal_subseries(monthly_data)
+
+# 3. Save to catalog
+ggsave(file.path(outputs_dir, "plot_trend_monthly_notifications.png"), monthly_plot, width = 12, height = 6, dpi = 300, bg = "white")
+ggsave(file.path(outputs_dir, "plot_trend_seasonal.png"), seasonal_plot, width = 12, height = 6, dpi = 300, bg = "white")
+
+# Display in console/viewer
+print(monthly_plot)
+print(seasonal_plot)
+
 # 5. Finalize -----------------------------------------------------
 message(">>> Catalog complete! Files saved to: ", outputs_dir)
 
 # Open the folder (Windows specific - remove if on Mac/Linux)
 shell.exec(outputs_dir)
+
