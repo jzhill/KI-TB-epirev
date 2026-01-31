@@ -95,7 +95,9 @@ If there are unexpected results in analysis or problems running the script
 
 ## 5. Collaboration Contract
 
--   **Minimalism**: Propose small, modular changes.
+-   **Minimalism**: Propose small, modular changes. Do NOT make unnecessary or arbitrary changes to object names or unrequested code changes.
+
+-   **Transparency**: Any and all changes that are proposed, however trivial, should be flagged and described when proposing patches or amendments.
 
 -   **Validation**: Every code change should be accompanied by a suggestion for a QA check (e.g., "After this mutate, run `count(new_var)` to check for NAs").
 

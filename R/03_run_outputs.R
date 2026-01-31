@@ -21,8 +21,10 @@ ref_file <- here("data-processed", "current_register_reference.txt")
 if (!file.exists(ref_file)) stop("Reference file missing. Run Script 01 first.")
 
 current_ref <- readLines(ref_file, n = 1)
+dated_ref <- paste0(format(Sys.Date(), "%y%m%d"), "_", current_ref)
+
 current_dir <- here("data-processed", current_ref)
-outputs_dir <- here("outputs", current_ref)
+outputs_dir <- here("outputs", dated_ref)
 if (!dir.exists(outputs_dir)) dir.create(outputs_dir, recursive = TRUE)
 
 
