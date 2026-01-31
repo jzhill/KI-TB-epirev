@@ -121,6 +121,23 @@ build_demo_table_stoi <- function(
     include_unknown_rows = TRUE
 ) {
   
+  # Calculates p-value for difference in proportions between ST and OI
+  get_st_oi_pvalue <- function(st_n, st_denom, oi_n, oi_denom) {
+    if (is.na(st_denom) || is.na(oi_denom) || st_denom == 0 || oi_denom == 0) return(NA_real_)
+    # Use prop.test for Chi-squared test of proportions
+    res <- suppressWarnings(prop.test(x = c(st_n, oi_n), n = c(st_denom, oi_denom)))
+    return(res$p.value)
+  }
+  
+  # Creates stars for significance
+  format_p_stars <- function(p) {
+    if (is.na(p)) return("")
+    if (p < 0.001) return("***")
+    if (p < 0.01) return("**")
+    if (p < 0.05) return("*")
+    return("")
+  }
+  
   # df_all is the analytic cohort
   # Includes: All registered TB cases within the specified year range.
   # Note: 'NR' (Not Recorded) values for geographic location are KEPT here 
@@ -131,6 +148,9 @@ build_demo_table_stoi <- function(
       reg_year = suppressWarnings(as.integer(as.character(reg_year)))
     ) %>%
     filter(!is.na(reg_year), reg_year >= year_min, reg_year <= year_max)
+
+  # Identify count for footnote before filtering for the ST/OI cohort
+  n_unclassified_geo <- nrow(df_all %>% filter(OI_ST == "Unclassified"))
   
   # df_stoi is the Geographic Comparison Cohort
   # Includes: Only cases with a confirmed location in South Tarawa (ST) or Outer Islands (OI).
@@ -224,12 +244,25 @@ build_demo_table_stoi <- function(
     # Final row construction
     full_join(n_all, n_stoi, by = "value") %>%
       mutate(across(ends_with("_n"), ~replace_na(., 0L))) %>%
+      # Calculate Significance
+      mutate(
+        p_raw = map2_dbl(ST_n, OI_n, ~get_st_oi_pvalue(.x, denom_st, .y, denom_oi)),
+        # Format P-value column to handle "<0.001"
+        p_fmt = case_when(
+          is.na(p_raw) ~ "",
+          p_raw < 0.001 ~ "<0.001",
+          TRUE ~ sprintf("%.3f", p_raw)
+        ),
+        sig_stars = map_chr(p_raw, format_p_stars)
+      ) %>%
       transmute(
         Attribute = block,
         Group = paste0("  ", as.character(value)),
+        All = format_cell(All_n, denom_all),
         ST  = format_cell(ST_n,  denom_st),
         OI  = format_cell(OI_n,  denom_oi),
-        All = format_cell(All_n, denom_all)
+        P   = p_fmt,
+        Sig = sig_stars
       )
     
   }
@@ -240,9 +273,11 @@ build_demo_table_stoi <- function(
   all_cases <- tibble(
     Attribute = "All cases",
     Group = paste0("Total registered cases"),
+    All = format(denom_all, big.mark = ","),
     ST  = format(denom_st, big.mark = ","),
     OI  = format(denom_oi, big.mark = ","),
-    All = format(denom_all, big.mark = ",")
+    P   = "",
+    Sig = ""
   )
   
   # Sex
@@ -313,12 +348,65 @@ build_demo_table_stoi <- function(
     )
 
   
+
   # Outcome
   out_levels <- if (is.factor(df_all$outcome_factor)) levels(df_all$outcome_factor) else NULL
-  outcome_tab <- tab_one(
+  
+  # Generate the standard outcome table rows
+  outcome_tab_raw <- tab_one(
     outcome_factor,
     levels = out_levels,
     block = "Outcome"
+  ) %>%
+    # Indent the component rows that make up 'Treatment successful'
+    mutate(Group = case_when(
+      Group == "  Cured" ~ "    Cured",
+      Group == "  Treatment completed" ~ "    Completed",
+      TRUE ~ Group
+    ))
+  
+  # Create the "Treatment successful" summary row
+  # This sums 'Cured' and 'Treatment completed' (Levels 1 and 2)
+  # Note: Uses the raw counts from df_all and df_stoi to ensure correct p-value calculation
+  
+  success_stats <- df_all %>%
+    mutate(is_success = outcome_factor %in% c("Cured", "Treatment completed")) %>%
+    group_by(group = "All") %>%
+    summarise(n = sum(is_success, na.rm = TRUE), .groups = "drop") %>%
+    bind_rows(
+      df_stoi %>%
+        mutate(is_success = outcome_factor %in% c("Cured", "Treatment completed")) %>%
+        group_by(group = OI_ST) %>%
+        summarise(n = sum(is_success, na.rm = TRUE), .groups = "drop")
+    ) %>%
+    tidyr::pivot_wider(names_from = group, values_from = n) %>%
+    rename(All_n = All, ST_n = `South Tarawa`, OI_n = `Outer Islands`)
+  
+  success_row <- success_stats %>%
+    mutate(
+      p_raw = purrr::map2_dbl(ST_n, OI_n, ~get_st_oi_pvalue(.x, denom_st, .y, denom_oi)),
+      p_fmt = case_when(
+        is.na(p_raw) ~ "",
+        p_raw < 0.001 ~ "<0.001",
+        TRUE ~ sprintf("%.3f", p_raw)
+      ),
+      sig_stars = purrr::map_chr(p_raw, format_p_stars)
+    ) %>%
+    transmute(
+      Attribute = "Outcome",
+      Group = "  Treatment successful",
+      All = format_cell(All_n, denom_all),
+      ST  = format_cell(ST_n,  denom_st),
+      OI  = format_cell(OI_n,  denom_oi),
+      P   = p_fmt,
+      Sig = sig_stars
+    )
+  
+  # Combine success row with the rest of the outcome table
+  # We adjust the individual rows to look like sub-categories
+  outcome_tab <- bind_rows(
+    success_row,
+    outcome_tab_raw
   )
   
   final_df <- bind_rows(
@@ -332,18 +420,26 @@ build_demo_table_stoi <- function(
     outcome_tab
   )
   
+
   # Create Flextable with dynamic header
   ft_obj <- final_df %>%
     as_grouped_data(groups = "Attribute") %>%
     as_flextable(hide_grouplabel = TRUE) %>%
     set_header_labels(
       Group = "Attribute",
+      All = paste0("Total*"),
       ST = paste0("South Tarawa"),
       OI = paste0("Outer Islands"),
-      All = paste0("Total")
+      P = "p-value**",
+      Sig = ""
     ) %>%
+    add_footer_lines(paste0("* n unclassified geography = ", n_unclassified_geo)) %>%
+    add_footer_lines("** p-value indicates difference in proportions between South Tarawa and Outer Islands (Chi-squared test). Significance: * p<0.05, ** p<0.01, *** p<0.001.") %>%
     style_ki_table(caption = paste("Demographic and clinical characteristics of TB cases,", year_min, "–", year_max)) %>% 
-    align(j = 2:4, align = "center", part = "all") %>%
+    align(j = 2:5, align = "center", part = "all") %>%
+    align(j = 6, align = "left", part = "all") %>%
+    width(j = 5, width = 0.7) %>%
+    width(j = 6, width = 0.3) %>%
     bold(i = ~ !is.na(Attribute)) # Bold the block headers
   
   # Return structured list
@@ -354,7 +450,8 @@ build_demo_table_stoi <- function(
       years = c(year_min, year_max),
       n_total = denom_all,
       n_st = denom_st,
-      n_oi = denom_oi
+      n_oi = denom_oi,
+      n_unclassified_geo = n_unclassified_geo
     )
   ))
 }
