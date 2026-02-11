@@ -86,8 +86,8 @@ geo_processed <- geo_processed %>%
     
     # Concatenated from the binary flags found in the text
     island_search = paste(sort(str_remove(is_cols[c_across(all_of(is_cols)) == 1], "is_")), collapse = "-"),
-    ST_village_search = paste(sort(str_remove(st_cols[c_across(all_of(st_cols)) == 1], "st_v_")), collapse = "-"),
-    NT_village_search = paste(sort(str_remove(nt_cols[c_across(all_of(nt_cols)) == 1], "nt_v_")), collapse = "-")
+    st_village_search = paste(sort(str_remove(st_cols[c_across(all_of(st_cols)) == 1], "st_v_")), collapse = "-"),
+    nt_village_search = paste(sort(str_remove(nt_cols[c_across(all_of(nt_cols)) == 1], "nt_v_")), collapse = "-")
   ) %>%
   ungroup() %>%
   
@@ -105,9 +105,9 @@ geo_processed <- geo_processed %>%
       !is.na(island_search) & !str_detect(island_search, "-") ~ island_search,
       
       # Inference - Search is blank, but villages were found
-      is.na(island_search) & !is.na(ST_village_search) & !is.na(NT_village_search)  ~ "",
-      is.na(island_search) & !is.na(ST_village_search)  ~ "south tarawa",
-      is.na(island_search) & !is.na(NT_village_search) ~ "north tarawa",
+      is.na(island_search) & !is.na(st_village_search) & !is.na(nt_village_search)  ~ "",
+      is.na(island_search) & !is.na(st_village_search)  ~ "south tarawa",
+      is.na(island_search) & !is.na(nt_village_search) ~ "north tarawa",
       
       # Default: Leave empty for manual review
       TRUE ~ ""
@@ -116,17 +116,17 @@ geo_processed <- geo_processed %>%
     # Village allocation based on search and manual inputs
     # Constraint: Villages only appear if the Island matches the parent group
     
-    ST_village = case_when(
+    st_village = case_when(
       island != "south tarawa" ~ "",
-      !is.na(ST_village_manual) & (ST_village_manual %in% st_village_names) ~ as.character(ST_village_manual),
-      !is.na(ST_village_search) & !str_detect(ST_village_search, "-") ~ ST_village_search,
+      !is.na(st_village_manual) & (st_village_manual %in% st_village_names) ~ as.character(st_village_manual),
+      !is.na(st_village_search) & !str_detect(st_village_search, "-") ~ st_village_search,
       TRUE ~ ""
     ),
     
-    NT_village = case_when(
+    nt_village = case_when(
       island != "north tarawa" ~ "" ,
-      !is.na(NT_village_manual) & (NT_village_manual %in% nt_village_names) ~ as.character(NT_village_manual),
-      !is.na(NT_village_search) & !str_detect(NT_village_search, "-") ~ NT_village_search,
+      !is.na(nt_village_manual) & (nt_village_manual %in% nt_village_names) ~ as.character(nt_village_manual),
+      !is.na(nt_village_search) & !str_detect(nt_village_search, "-") ~ nt_village_search,
       TRUE ~ ""
     )
   )
