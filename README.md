@@ -137,7 +137,7 @@ This allows us to make sure that the our data coding steps are not missing a who
 
 In the example above, there are two methods for applying a new lookup code. For island spelling errors, we can use the "lookup strings" worksheet from the raw `geo_helper.xlsx` file. This sheet contains a list of search strings or synonyms for each island or village. Usage:
 
-1.  Add new synonym underneath the island or village list
+1.  Add new synonym underneath the island or village list in "lookup strings". (There is an `=LET()` function in "lookup table" worksheet that translates the synonyms into long format.)
 2.  Save the file
 3.  Run `04_geo_lookup_helper.R`
 4.  Copy the `unique_geo_lookup_processed.csv` into data-raw
