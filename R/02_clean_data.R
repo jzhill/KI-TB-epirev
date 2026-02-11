@@ -839,9 +839,9 @@ drtb_pattern <- paste(
 )
 
 reg_combined <- reg_combined %>%
-  tidyr::unite(
+  unite(
     col = "drtb_search_blob",
-    dplyr::any_of(raw_cols),
+    any_of(raw_cols),
     sep = " | ",
     na.rm = TRUE,
     remove = FALSE
