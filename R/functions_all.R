@@ -360,7 +360,7 @@ get_official_geo_metadata <- function(geo_path = here("data-raw", "geo_helper.xl
   if (!file.exists(geo_path)) stop("! Geo helper (xlsx) not found.")
   
   # Load the raw census mapping
-  census_codes_df <- readxl::read_excel(geo_path, sheet = "census_codes") %>%
+  census_codes_df <- read_excel(geo_path, sheet = "census_codes") %>%
     mutate(across(everything(), ~str_trim(str_to_lower(as.character(.)))))
   
   # Universal helper to extract unique, ordered levels
@@ -390,10 +390,32 @@ get_official_geo_metadata <- function(geo_path = here("data-raw", "geo_helper.xl
     
     # Village levels (for 02_ address cleaning)
     st_village_names = get_levels("village_name", "village_code", "island_name", "south tarawa"),
+    st_village_codes = get_levels("village_code", "village_code", "island_name", "south tarawa"),
     nt_village_names = get_levels("village_name", "village_code", "island_name", "north tarawa"),
+    nt_village_codes = get_levels("village_code", "village_code", "island_name", "north tarawa"),
     
-    census_codes = census_codes_df
+    # Council and Region groupings (oi_st)
+    oi_st_names      = na.omit(unique(census_codes_df$oi_st)),
+    council_names    = na.omit(unique(census_codes_df$council)),
+    
+    # Census code lookup tables at village and island level
+    census_village = census_codes_df,
+    census_island  = census_codes_df %>% 
+      select(division_code, division_name, island_code, island_name, oi_st) %>% 
+      distinct()
   )
+}
+
+# Validate geo values in population file
+# Expected to be the same official list of names as used for geo classification of reg_combined
+
+validate_geo_values <- function(actual, reference, label) {
+  
+  invalid <- setdiff(actual, reference)
+  
+  if (length(invalid) > 0) {
+    stop(paste0("! Invalid values in '", label, "': "), paste(invalid, collapse = ", "))
+  }
 }
 
 
